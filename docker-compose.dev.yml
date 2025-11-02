@@ -1,0 +1,6 @@
+services:
+  app:
+    volumes:
+      - ./:/app:ro
+    environment:
+      STREAMLIT_SERVER_FILE_WATCHER_TYPE: "poll"

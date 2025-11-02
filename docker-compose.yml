@@ -1,0 +1,13 @@
+name: sociallisteningpro
+services:
+  app:
+    build: .
+    image: sociallisteningpro:latest
+    container_name: sociallisteningpro
+    environment:
+      TWITTERAPI_IO_KEY: ${TWITTERAPI_IO_KEY}
+      APIFY_TOKEN: ${APIFY_TOKEN}
+      PORT: ${PORT:-8501}
+    ports:
+      - "${PORT:-8501}:8501"
+    restart: unless-stopped
