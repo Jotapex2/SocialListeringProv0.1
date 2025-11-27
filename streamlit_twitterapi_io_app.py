@@ -30,7 +30,7 @@ def login():
     if st.button("Entrar"):
         if user == USERNAME and pwd == PASSWORD:
             st.session_state['logged_in'] = True
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.error("Usuario o contraseña incorrecta.")
 
