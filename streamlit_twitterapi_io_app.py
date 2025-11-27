@@ -12,10 +12,33 @@ from pandas.api.types import is_datetime64tz_dtype
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Callable
 import logging
-
+import streamlit as st
 # ============================================================================
 # CONFIGURACIÓN INICIAL
 # ============================================================================
+
+
+
+# Definir usuario y contraseña (puedes cambiar a lo que quieras)
+USERNAME = "Jota"
+PASSWORD = "Ñandu1314"
+
+def login():
+    st.title("Login de administrador")
+    user = st.text_input("Usuario")
+    pwd = st.text_input("Contraseña", type="password")
+    if st.button("Entrar"):
+        if user == USERNAME and pwd == PASSWORD:
+            st.session_state['logged_in'] = True
+            st.experimental_rerun()
+        else:
+            st.error("Usuario o contraseña incorrecta.")
+
+if "logged_in" not in st.session_state or not st.session_state['logged_in']:
+    login()
+    st.stop()
+# Desde aquí comienza el código de tu app normalmente
+
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 BUILD_TAG = "RRSS-Pro v3.0 - Optimized Apify + Enhanced Error Handling. Creado por Juan Pablo González Urriola"
