@@ -4,7 +4,6 @@ pandas>=2.0
 python-dotenv>=1.0
 pytz>=2024.1
 xlsxwriter>=3.1
-pysentimiento>=0.7
 torch>=2.0
 wordcloud>=1.9
 matplotlib>=3.7
