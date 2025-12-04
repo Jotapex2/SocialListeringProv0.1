@@ -1247,82 +1247,80 @@ df = st.session_state.get("df")
 
 if df is not None and not df.empty:
     # Análisis de sentimiento
-if sentimentflag and sentiment not in df.columns and text in df.columns:
-    with st.spinner("Analizando sentimiento con DeepSeek API..."):
-        try:
-            deepseek_key = env("DEEPSEEK_API_KEY")
-            if not deepseek_key:
-                st.error("Falta DEEPSEEK_API_KEY en variables de entorno")
-                st.stop()
-            
-            @st.cache_resource(show_spinner=False)
-            def get_deepseek_analyzer():
-                import httpx
-                return httpx.Client(
-                    base_url="https://api.deepseek.com",
-                    headers={"Authorization": f"Bearer {deepseek_key}"}
-                )
-            
-            client = get_deepseek_analyzer()
-            sentiments = []
-            
-            # Procesamiento en lotes para mejor performance
-            batch_size = 10
-            for i in range(0, len(df), batch_size):
-                batch = df['text'].astype(str).iloc[i:i+batch_size].tolist()
+    if sentimentflag and sentiment not in df.columns and text in df.columns:
+        with st.spinner("Analizando sentimiento con DeepSeek API..."):
+            try:
+                deepseek_key = env("DEEPSEEK_API_KEY")
+                if not deepseek_key:
+                    st.error("Falta DEEPSEEK_API_KEY en variables de entorno")
+                    st.stop()
                 
-                for text in batch:
-                    try:
-                        # Prompt en español para análisis de sentimiento
-                        prompt = f"""Analiza el sentimiento del siguiente texto y responde SOLO con una de estas tres opciones: POS, NEG o NEU
+                @st.cache_resource(show_spinner=False)
+                def get_deepseek_analyzer():
+                    import httpx
+                    return httpx.Client(
+                        base_url="https://api.deepseek.com",
+                        headers={"Authorization": f"Bearer {deepseek_key}"}
+                    )
+                
+                client = get_deepseek_analyzer()
+                sentiments = []
+                
+                # Procesamiento en lotes para mejor performance
+                batch_size = 10
+                for i in range(0, len(df), batch_size):
+                    batch = df['text'].astype(str).iloc[i:i+batch_size].tolist()
+                    
+                    for text_content in batch:
+                        try:
+                            # Prompt en español para análisis de sentimiento
+                            prompt = f"""Analiza el sentimiento del siguiente texto y responde SOLO con una de estas tres opciones: POS, NEG o NEU
 
-Texto: {text}
+Texto: {text_content}
 
 Respuesta:"""
-                        
-                        response = client.post(
-                            "/v1/chat/completions",
-                            json={
-                                "model": "deepseek-chat",
-                                "messages": [
-                                    {"role": "user", "content": prompt}
-                                ],
-                                "temperature": 0,
-                                "max_tokens": 10
-                            },
-                            timeout=30
-                        )
-                        
-                        if response.status_code == 200:
-                            result = response.json()
-                            sentiment = result['choices'][0]['message']['content'].strip().upper()
                             
-                            # Validar que sea uno de los 3 valores
-                            if sentiment in ["POS", "NEG", "NEU"]:
-                                sentiments.append(sentiment)
+                            response = client.post(
+                                "/v1/chat/completions",
+                                json={
+                                    "model": "deepseek-chat",
+                                    "messages": [
+                                        {"role": "user", "content": prompt}
+                                    ],
+                                    "temperature": 0,
+                                    "max_tokens": 10
+                                },
+                                timeout=30
+                            )
+                            
+                            if response.status_code == 200:
+                                result = response.json()
+                                sentiment_value = result['choices'][0]['message']['content'].strip().upper()
+                                
+                                # Validar que sea uno de los 3 valores
+                                if sentiment_value in ["POS", "NEG", "NEU"]:
+                                    sentiments.append(sentiment_value)
+                                else:
+                                    sentiments.append("NEU")
                             else:
-                                sentiments.append("NEU")
-                        else:
-                            log_message(f"DeepSeek error {response.status_code}", "warning")
+                                log_message(f"DeepSeek error {response.status_code}", "warning")
+                                sentiments.append(None)
+                        
+                        except Exception as e:
+                            log_message(f"Error procesando texto: {e}", "warning")
                             sentiments.append(None)
                     
-                    except Exception as e:
-                        log_message(f"Error procesando texto: {e}", "warning")
-                        sentiments.append(None)
+                    # Mostrar progreso
+                    progress = min((i + batch_size) / len(df), 1.0)
+                    prog.progress(progress, text=f"Procesado {min(i+batch_size, len(df))}/{len(df)}...")
                 
-                # Mostrar progreso
-                progress = min((i + batch_size) / len(df), 1.0)
-                prog.progress(progress, text=f"Procesado {min(i+batch_size, len(df))}/{len(df)}...")
+                df['sentiment'] = sentiments
+                st.session_state.df = df
+                log_message(f"Sentimiento analizado en {len(df)} posts")
             
-            df['sentiment'] = sentiments
-            st.session_state.df = df
-            log_message(f"Sentimiento analizado en {len(df)} posts")
-        
-        except Exception as e:
-            st.info(f"No se pudo aplicar análisis de sentimiento: {e}")
-            log_message(f"Error en sentimiento: {e}", "warning")
-
-    
+            except Exception as e:
+                st.info(f"No se pudo aplicar análisis de sentimiento: {e}")
+                log_message(f"Error en sentimiento: {e}", "warning")
     # MÉTRICAS RESUMEN
     total = len(df)
     likes = int(df.get("likes", pd.Series(dtype="float")).fillna(0).sum())
