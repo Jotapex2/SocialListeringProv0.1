@@ -1,6 +1,7 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
 # Versión optimizada con mejor manejo de errores y procesamiento robusto
 # Mejoras: retry logic, logging, validaciones, performance
+# ✅ ACTUALIZADO: Reemplazado pysentimiento por DeepSeek API
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
@@ -12,36 +13,15 @@ from pandas.api.types import is_datetime64tz_dtype
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Callable
 import logging
-import streamlit as st
+import httpx
+
 # ============================================================================
 # CONFIGURACIÓN INICIAL
 # ============================================================================
 
-
-
-# Definir usuario y contraseña (puedes cambiar a lo que quieras)
-USERNAME = "Jota"
-PASSWORD = "Ñandu1314"
-
-def login():
-    st.title("Login de administrador")
-    user = st.text_input("Usuario")
-    pwd = st.text_input("Contraseña", type="password")
-    if st.button("Entrar"):
-        if user == USERNAME and pwd == PASSWORD:
-            st.session_state['logged_in'] = True
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrecta.")
-
-if "logged_in" not in st.session_state or not st.session_state['logged_in']:
-    login()
-    st.stop()
-# Desde aquí comienza el código de tu app normalmente
-
-
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
-BUILD_TAG = "RRSS-Pro v3.0 - Optimized Apify + Enhanced Error Handling. Creado por Juan Pablo González Urriola"
+
+BUILD_TAG = "RRSS-Pro v3.0 - DeepSeek Sentiment API + Enhanced Error Handling"
 st.caption(f"Build: {BUILD_TAG}")
 
 # Configuración de logging
@@ -123,13 +103,13 @@ EXTRA_STOP = {
     "tanto","esa","estos","mucho","quienes","nada","muchos","cual","poco","ella","estas","algunas",
     "algo","nosotros","mis","tu","tus","ellas","nosotras","vosotros","vosotras","os"
 }
+
 STOP = STOPWORDS.union(EXTRA_STOP)
 
 def clean_texts(texts: pd.Series) -> str:
     """Limpia y normaliza textos para wordcloud"""
     blob = []
     url_re = re.compile(r"http\S+|www\.\S+", re.I)
-    
     for s in texts.fillna("").astype(str):
         s = s.lower()
         s = url_re.sub(" ", s)
@@ -138,7 +118,6 @@ def clean_texts(texts: pd.Series) -> str:
         s = re.sub(r"[^a-z\s]", " ", s)
         words = [w for w in s.split() if w not in STOP and len(w) > 2]
         blob.extend(words)
-    
     return " ".join(blob)
 
 def wordcloud_from_blob(blob: str, max_words: int = 200):
@@ -148,11 +127,11 @@ def wordcloud_from_blob(blob: str, max_words: int = 200):
         return
     
     wc = WordCloud(
-        width=1200, 
-        height=500, 
+        width=1200,
+        height=500,
         background_color="white",
-        collocations=False, 
-        stopwords=STOP, 
+        collocations=False,
+        stopwords=STOP,
         max_words=max_words,
         colormap="viridis"
     ).generate(blob)
@@ -224,13 +203,91 @@ def retry_on_failure(func: Callable, max_retries: int = MAX_RETRIES, delay: int 
                 raise
 
 # ============================================================================
+# ANALYZE SENTIMENT WITH DEEPSEEK API
+# ============================================================================
+
+def analyze_sentiment_deepseek(texts: List[str], batch_size: int = 10, progress_cb: Optional[Callable] = None) -> List[str]:
+    """
+    Analiza sentimiento usando DeepSeek API
+    Retorna lista con valores: POS, NEG, NEU
+    """
+    deepseek_key = env("DEEPSEEK_API_KEY")
+    if not deepseek_key:
+        raise RuntimeError("Falta DEEPSEEK_API_KEY en variables de entorno")
+    
+    sentiments = []
+    
+    client = httpx.Client(
+        base_url="https://api.deepseek.com",
+        headers={"Authorization": f"Bearer {deepseek_key}"}
+    )
+    
+    total_texts = len(texts)
+    
+    try:
+        # Procesamiento en lotes
+        for batch_idx in range(0, total_texts, batch_size):
+            batch = texts[batch_idx:batch_idx + batch_size]
+            
+            for text_idx, text in enumerate(batch):
+                current_idx = batch_idx + text_idx
+                
+                try:
+                    # Prompt optimizado para DeepSeek en español
+                    prompt = f"""Analiza el sentimiento del siguiente texto y responde SOLO con UNA de estas tres opciones: POS, NEG o NEU
+
+Texto: {text}
+
+Respuesta:"""
+                    
+                    response = client.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "deepseek-chat",
+                            "messages": [
+                                {"role": "user", "content": prompt}
+                            ],
+                            "temperature": 0,
+                            "max_tokens": 10
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        sentiment = result['choices'][0]['message']['content'].strip().upper()
+                        
+                        # Validar que sea uno de los 3 valores
+                        if sentiment in ["POS", "NEG", "NEU"]:
+                            sentiments.append(sentiment)
+                        else:
+                            log_message(f"Respuesta inválida: {sentiment}, asignando NEU", "warning")
+                            sentiments.append("NEU")
+                    else:
+                        log_message(f"DeepSeek error {response.status_code}", "warning")
+                        sentiments.append("NEU")
+                
+                except Exception as e:
+                    log_message(f"Error procesando texto {current_idx}: {e}", "warning")
+                    sentiments.append("NEU")
+            
+            # Mostrar progreso
+            if progress_cb:
+                progress = min((batch_idx + batch_size) / total_texts, 1.0)
+                progress_cb(progress)
+    
+    finally:
+        client.close()
+    
+    return sentiments
+
+# ============================================================================
 # NORMALIZE DATA
 # ============================================================================
 
 def normalize_common(rows: List[Dict], platform: str) -> pd.DataFrame:
     """Normaliza datos de diferentes plataformas a esquema común"""
     df = pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
-    
     if df.empty:
         return df
     
@@ -276,7 +333,6 @@ def normalize_common(rows: List[Dict], platform: str) -> pd.DataFrame:
             _first_series(df, ["takenAtTimestamp", "taken_at_timestamp", "created_timestamp", "date"], None),
             errors="coerce"
         )
-        
         if created_epoch.notna().any():
             mask = df["created_at"].isna() if "created_at" in df.columns else pd.Series(True, index=df.index)
             if mask.any():
@@ -308,7 +364,6 @@ def normalize_common(rows: List[Dict], platform: str) -> pd.DataFrame:
         created_iso = _first_series(df, ["createTimeISO", "datetime", "publishedTime"], None)
         created_unix = pd.to_numeric(_first_series(df, ["createTime"], None), errors="coerce")
         df["created_at"] = created_iso
-        
         mask_fill = df["created_at"].isna() & created_unix.notna()
         if mask_fill.any():
             df.loc[mask_fill, "created_at"] = pd.to_datetime(created_unix[mask_fill], unit="s", utc=True, errors="coerce")
@@ -345,43 +400,43 @@ def normalize_common(rows: List[Dict], platform: str) -> pd.DataFrame:
 # X / TWITTER (twitterapi.io)
 # ============================================================================
 
-def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, 
-                    d1: Optional[date], d2: Optional[date]) -> str:
+def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
+                    d1: Optional[date], d2: Optional[date], filter_chile: bool = False) -> str:
     """Compone query de búsqueda para X"""
     q = topic.strip()
     if not q.startswith("("):
         q = f"({q})"
-    
     if lang:
         q += f" lang:{lang}"
     if exclude_rt:
         q += " -is:retweet"
     if exclude_repl:
         q += " -is:reply"
+    if filter_chile:
+        q += " place_country:CL"
     if d1:
         q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2:
         q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
-    
     return q
 
 def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool,
-                         d1: Optional[date], d2: Optional[date]) -> str:
+                         d1: Optional[date], d2: Optional[date], filter_chile: bool = False) -> str:
     """Compone query de usuario para X"""
     u = username.strip().lstrip("@")
     q = f"from:{u}"
-    
     if lang:
         q += f" lang:{lang}"
     if exclude_rt:
         q += " -is:retweet"
     if exclude_repl:
         q += " -is:reply"
+    if filter_chile:
+        q += " place_country:CL"
     if d1:
         q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2:
         q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
-    
     return q
 
 def normalize_rows_x(data: Dict) -> List[Dict]:
@@ -403,7 +458,7 @@ def normalize_rows_x(data: Dict) -> List[Dict]:
         })
     return rows
 
-def fetch_x(api_key: str, query: str, query_type: str = "Latest", limit: int = 300, 
+def fetch_x(api_key: str, query: str, query_type: str = "Latest", limit: int = 300,
             sleep_s: float = 5.2, progress_cb: Optional[Callable] = None) -> pd.DataFrame:
     """Obtiene tweets de X usando twitterapi.io"""
     headers = {"x-api-key": api_key}
@@ -438,17 +493,19 @@ def fetch_x(api_key: str, query: str, query_type: str = "Latest", limit: int = 3
             for row in rows:
                 acc.append(row)
                 seen += 1
-                if progress_cb:
-                    progress_cb(min(seen / max(1, limit), 1.0))
-                if seen >= limit:
-                    break
+            
+            if progress_cb:
+                progress_cb(min(seen / max(1, limit), 1.0))
+            
+            if seen >= limit:
+                break
             
             cursor = data.get("next_cursor") if data.get("has_next_page") else None
             if not cursor:
                 break
             
             time.sleep(sleep_s)
-            
+        
         except Exception as e:
             log_message(f"Error en fetch_x: {e}", "error")
             raise
@@ -513,8 +570,8 @@ def _apify_fetch_dataset_items(dataset_id: str, token: str, limit: int = 200) ->
         return []
 
 def _apify_run_async_and_get_items(actor_id: str, token: str, payload: Dict,
-                                    limit: int = 200, max_wait_s: int = ASYNC_MAX_WAIT,
-                                    poll_every_s: int = ASYNC_POLL_INTERVAL) -> List[Dict]:
+                                   limit: int = 200, max_wait_s: int = ASYNC_MAX_WAIT,
+                                   poll_every_s: int = ASYNC_POLL_INTERVAL) -> List[Dict]:
     """Ejecuta actor de Apify de forma asíncrona con polling"""
     url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
     
@@ -547,7 +604,6 @@ def _apify_run_async_and_get_items(actor_id: str, token: str, payload: Dict,
             if rr.status_code == 200:
                 d = rr.json().get("data") or {}
                 status = d.get("status", status)
-                
                 log_message(f"Status: {status} ({waited}s/{max_wait_s}s)")
                 
                 if status == "SUCCEEDED":
@@ -564,7 +620,7 @@ def _apify_run_async_and_get_items(actor_id: str, token: str, payload: Dict,
     
     raise RuntimeError(f"Apify {actor_id}: timeout tras {max_wait_s}s (run {run_id})")
 
-def apify_run_sync_items(actor_id: str, token: str, payload: Dict, 
+def apify_run_sync_items(actor_id: str, token: str, payload: Dict,
                          limit: int = 200, timeout_s: int = DEFAULT_TIMEOUT) -> List[Dict]:
     """Ejecuta actor de Apify con fallback a modo asíncrono"""
     url = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/run-sync-get-dataset-items"
@@ -625,7 +681,7 @@ def apify_run_sync_items(actor_id: str, token: str, payload: Dict,
     except requests.exceptions.ReadTimeout:
         log_message("ReadTimeout, fallback a modo async", "warning")
         return _apify_run_async_and_get_items(
-            actor_id, token, payload_with_proxy, 
+            actor_id, token, payload_with_proxy,
             limit=limit, max_wait_s=max(timeout_s * 2, 300)
         )
     
@@ -659,7 +715,6 @@ def parse_instagram_usernames(raw: str) -> List[str]:
         if u and u not in seen:
             seen.add(u)
             out.append(u)
-    
     return out
 
 def _ig_is_post(item: Dict) -> bool:
@@ -673,8 +728,8 @@ def _ig_is_post(item: Dict) -> bool:
     if any(x in k for x in ("shortcode", "short_code", "code")):
         return True
     
-    if any(x in k for x in ("caption", "takenat", "takenattimestamp", "timestamp", 
-                             "publishedtime", "createtime", "created_timestamp", "date")):
+    if any(x in k for x in ("caption", "takenat", "takenattimestamp", "timestamp",
+                            "publishedtime", "createtime", "created_timestamp", "date")):
         return True
     
     url = str(item.get("url") or item.get("link") or "")
@@ -732,8 +787,8 @@ def _ig_extract_posts_recursive(obj: Any, username_hint: Optional[str], out_list
         
         # Seguir recorriendo claves relevantes
         for key in (
-            "posts", "lastPosts", "recentPosts", "items", "edges", "nodes", "media", 
-            "feed", "timeline", "timelineMedia", "edge_owner_to_timeline_media", 
+            "posts", "lastPosts", "recentPosts", "items", "edges", "nodes", "media",
+            "feed", "timeline", "timelineMedia", "edge_owner_to_timeline_media",
             "graphql", "user", "edge_felix_video_timeline", "edge_web_feed_timeline"
         ):
             v = obj.get(key)
@@ -757,17 +812,16 @@ def _ig_extract_posts_from_profile_items(items: List[Dict], username_hint: Optio
         if key and key not in seen:
             seen.add(key)
             uniq.append(it)
-    
     return uniq
 
 def fetch_instagram_hashtags(apify_token: str, hashtags: List[str], limit: int) -> pd.DataFrame:
     """Obtiene posts de Instagram por hashtags"""
     payload = {"hashtags": hashtags, "resultsType": "posts", "resultsLimit": limit}
     items = retry_on_failure(
-        apify_run_sync_items, 
-        actor_id="apify/instagram-hashtag-scraper", 
-        token=apify_token, 
-        payload=payload, 
+        apify_run_sync_items,
+        actor_id="apify/instagram-hashtag-scraper",
+        token=apify_token,
+        payload=payload,
         limit=limit
     )
     items = _ig_extract_posts_from_profile_items(items, username_hint=None)
@@ -790,7 +844,7 @@ def fetch_instagram_user_posts(apify_token: str, usernames: List[str], limit: in
         variants = [
             {"username": u, "resultsType": "posts", "resultsLimit": per_user, "maxItems": per_user},
             {"usernames": [u], "resultsType": "posts", "resultsLimit": per_user, "maxItems": per_user},
-            {"directUrls": [f"https://www.instagram.com/{u}/"], "resultsType": "posts", 
+            {"directUrls": [f"https://www.instagram.com/{u}/"], "resultsType": "posts",
              "resultsLimit": per_user, "maxItems": per_user},
         ]
         
@@ -832,8 +886,8 @@ def fetch_instagram_user_posts(apify_token: str, usernames: List[str], limit: in
 def fetch_tiktok_hashtags(apify_token: str, hashtags: List[str], limit: int) -> pd.DataFrame:
     """Obtiene videos de TikTok por hashtags"""
     payload = {
-        "hashtags": hashtags, 
-        "resultsPerPage": 100, 
+        "hashtags": hashtags,
+        "resultsPerPage": 100,
         "shouldDownloadVideos": False
     }
     items = retry_on_failure(
@@ -868,7 +922,6 @@ def fetch_tiktok_user_posts(apify_token: str, usernames: List[str], limit: int) 
 def resolve_facebook_start_urls(apify_token: str, raw_input: str) -> List[Dict]:
     """Resuelve usernames/búsquedas a URLs de Facebook"""
     start_urls = []
-    
     for piece in [p.strip() for p in re.split(r"[ ,]+", raw_input or "") if p.strip()]:
         # URL directa
         if piece.startswith("http://") or piece.startswith("https://"):
@@ -890,7 +943,6 @@ def resolve_facebook_start_urls(apify_token: str, raw_input: str) -> List[Dict]:
                 "recent_posts": True
             }
             items = apify_run_sync_items("danek/facebook-search-ppr", apify_token, search_payload, limit=1)
-            
             if isinstance(items, list) and items:
                 cand = items[0]
                 for key in ("url", "pageUrl", "pageURL", "pageLink"):
@@ -903,7 +955,7 @@ def resolve_facebook_start_urls(apify_token: str, raw_input: str) -> List[Dict]:
     
     return start_urls
 
-def fetch_facebook_search(apify_token: str, query: str, d1: Optional[date], 
+def fetch_facebook_search(apify_token: str, query: str, d1: Optional[date],
                           d2: Optional[date], limit: int) -> pd.DataFrame:
     """Busca posts de Facebook por query"""
     payload = {
@@ -926,7 +978,6 @@ def fetch_facebook_user_posts(apify_token: str, usernames: List[str], limit: int
     """Obtiene posts de páginas/perfiles de Facebook"""
     raw = ", ".join(usernames)
     start_urls = resolve_facebook_start_urls(apify_token, raw)
-    
     if not start_urls:
         raise RuntimeError("No se pudo resolver el/los usuarios de Facebook a URL de página/perfil.")
     
@@ -1017,6 +1068,12 @@ with st.sidebar:
             value=st.session_state["params"].get("exclude_repl", True)
         )
     
+    filter_chile = st.checkbox(
+        "🇨🇱 Filtrar solo posts de Chile (X)",
+        value=st.session_state["params"].get("filter_chile", False),
+        help="Aplica 'place_country:CL' solo en X/Twitter"
+    )
+    
     st.divider()
     
     today = datetime.now(SCL_TZ).date()
@@ -1041,12 +1098,13 @@ with st.sidebar:
     )
     
     limit = st.slider("Límite de posts", 50, 5000, st.session_state["params"].get("limit", 300), 50)
+    
     max_words = st.slider("Máx. palabras nube", 50, 500, st.session_state["params"].get("max_words", 200), 25)
     
     sentiment = st.checkbox(
-        "Analizar sentimiento (español)",
+        "🧠 Analizar sentimiento con DeepSeek (español)",
         value=st.session_state["params"].get("sentiment", True),
-        help="Usa pysentimiento para análisis de sentimiento"
+        help="Requiere DEEPSEEK_API_KEY en variables de entorno"
     )
     
     debug = st.checkbox("🔧 Modo debug", value=False)
@@ -1064,10 +1122,10 @@ with st.expander("🔎 Vista previa de consulta"):
     if platform.startswith("X"):
         if search_mode == "Por usuario":
             u = username_input if 'username_input' in locals() else st.session_state["params"].get("username", "")
-            preview_query = compose_query_x_user(u, lang, exclude_rt, exclude_repl, d1, d2)
+            preview_query = compose_query_x_user(u, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
         else:
             t = topic if 'topic' in locals() else st.session_state["params"].get("topic", "")
-            preview_query = compose_query_x(t, lang, exclude_rt, exclude_repl, d1, d2)
+            preview_query = compose_query_x(t, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
         st.code(preview_query, language="text")
     elif platform == "Instagram":
         st.info(f"IG → {'Perfiles: ' + username_input if search_mode == 'Por usuario' else 'Hashtags: ' + hashtags_str}")
@@ -1105,20 +1163,21 @@ if run_btn:
                 if not username_input.strip():
                     st.error("❌ Ingresa al menos un usuario")
                     st.stop()
-                qx = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2)
+                qx = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
             else:
                 if not (topic and topic.strip()):
                     st.error("❌ Ingresa un tema de búsqueda")
                     st.stop()
-                qx = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2)
+                qx = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
             
             df = fetch_x(
-                api_x, qx, 
-                query_type=query_type, 
-                limit=limit, 
+                api_x, qx,
+                query_type=query_type,
+                limit=limit,
                 sleep_s=5.2,
                 progress_cb=lambda x: prog.progress(x, text=f"Obteniendo tweets... {int(x*100)}%")
             )
+            
             df = enforce_date_window(df, d1, d2)
             st.session_state["query_str"] = qx
         
@@ -1133,6 +1192,7 @@ if run_btn:
                 if not users:
                     st.error("❌ Ingresa usuario(s) o URL(s) de Instagram")
                     st.stop()
+                
                 prog.progress(0.1, text=f"Procesando {len(users)} usuario(s)...")
                 df = fetch_instagram_user_posts(api_apify, users, limit)
             else:
@@ -1140,6 +1200,7 @@ if run_btn:
                 if not tags:
                     st.error("❌ Ingresa al menos un hashtag")
                     st.stop()
+                
                 prog.progress(0.1, text=f"Buscando {len(tags)} hashtag(s)...")
                 df = fetch_instagram_hashtags(api_apify, tags, limit)
             
@@ -1157,6 +1218,7 @@ if run_btn:
                 if not users:
                     st.error("❌ Ingresa al menos un usuario")
                     st.stop()
+                
                 prog.progress(0.1, text=f"Procesando {len(users)} usuario(s)...")
                 df = fetch_tiktok_user_posts(api_apify, users, limit)
             else:
@@ -1164,6 +1226,7 @@ if run_btn:
                 if not tags:
                     st.error("❌ Ingresa al menos un hashtag")
                     st.stop()
+                
                 prog.progress(0.1, text=f"Buscando {len(tags)} hashtag(s)...")
                 df = fetch_tiktok_hashtags(api_apify, tags, limit)
             
@@ -1181,6 +1244,7 @@ if run_btn:
                 if not users:
                     st.error("❌ Ingresa al menos un usuario o URL")
                     st.stop()
+                
                 prog.progress(0.1, text="Resolviendo páginas de Facebook...")
                 df = fetch_facebook_user_posts(api_apify, users, limit)
                 df = enforce_date_window(df, d1, d2)
@@ -1189,6 +1253,7 @@ if run_btn:
                 if not (topic and topic.strip()):
                     st.error("❌ Ingresa un tema de búsqueda")
                     st.stop()
+                
                 prog.progress(0.1, text="Buscando en Facebook...")
                 df = fetch_facebook_search(api_apify, topic, d1, d2, limit)
                 st.session_state["query_str"] = f"FB search='{topic}'"
@@ -1203,6 +1268,7 @@ if run_btn:
         if df is None or df.empty:
             st.warning("⚠️ No se encontraron resultados con los parámetros especificados")
             st.stop()
+        
         else:
             st.session_state["df"] = df
             st.session_state["params"] = {
@@ -1213,6 +1279,7 @@ if run_btn:
                 "lang": lang,
                 "exclude_rt": exclude_rt,
                 "exclude_repl": exclude_repl,
+                "filter_chile": filter_chile,
                 "d1": d1,
                 "d2": d2,
                 "query_type": query_type,
@@ -1232,11 +1299,9 @@ if run_btn:
         prog.empty()
         st.error(f"❌ Error durante la búsqueda: {str(e)}")
         log_message(f"Error crítico: {e}", "error")
-        
         if debug:
             import traceback
             st.code(traceback.format_exc())
-        
         st.stop()
 
 # ============================================================================
@@ -1246,81 +1311,31 @@ if run_btn:
 df = st.session_state.get("df")
 
 if df is not None and not df.empty:
-    # Análisis de sentimiento
-    if sentimentflag and sentiment not in df.columns and text in df.columns:
-        with st.spinner("Analizando sentimiento con DeepSeek API..."):
+    
+    # Análisis de sentimiento con DeepSeek
+    sentiment_flag = st.session_state["params"].get("sentiment", True)
+    
+    if sentiment_flag and "sentiment" not in df.columns and "text" in df.columns:
+        with st.spinner("🧠 Analizando sentimiento con DeepSeek API..."):
             try:
-                deepseek_key = env("DEEPSEEK_API_KEY")
-                if not deepseek_key:
-                    st.error("Falta DEEPSEEK_API_KEY en variables de entorno")
-                    st.stop()
+                # Obtener textos
+                texts_to_analyze = df["text"].astype(str).tolist()
                 
-                @st.cache_resource(show_spinner=False)
-                def get_deepseek_analyzer():
-                    import httpx
-                    return httpx.Client(
-                        base_url="https://api.deepseek.com",
-                        headers={"Authorization": f"Bearer {deepseek_key}"}
-                    )
+                # Analizar con DeepSeek
+                sentiments = analyze_sentiment_deepseek(
+                    texts_to_analyze,
+                    batch_size=10,
+                    progress_cb=lambda x: None  # Puedes añadir progress aquí si quieres
+                )
                 
-                client = get_deepseek_analyzer()
-                sentiments = []
-                
-                # Procesamiento en lotes para mejor performance
-                batch_size = 10
-                for i in range(0, len(df), batch_size):
-                    batch = df['text'].astype(str).iloc[i:i+batch_size].tolist()
-                    
-                    for text_content in batch:
-                        try:
-                            # Prompt en español para análisis de sentimiento
-                            prompt = f"""Analiza el sentimiento del siguiente texto y responde SOLO con una de estas tres opciones: POS, NEG o NEU
-
-Texto: {text_content}
-
-Respuesta:"""
-                            
-                            response = client.post(
-                                "/v1/chat/completions",
-                                json={
-                                    "model": "deepseek-chat",
-                                    "messages": [
-                                        {"role": "user", "content": prompt}
-                                    ],
-                                    "temperature": 0,
-                                    "max_tokens": 10
-                                },
-                                timeout=30
-                            )
-                            
-                            if response.status_code == 200:
-                                result = response.json()
-                                sentiment_value = result['choices'][0]['message']['content'].strip().upper()
-                                
-                                # Validar que sea uno de los 3 valores
-                                if sentiment_value in ["POS", "NEG", "NEU"]:
-                                    sentiments.append(sentiment_value)
-                                else:
-                                    sentiments.append("NEU")
-                            else:
-                                log_message(f"DeepSeek error {response.status_code}", "warning")
-                                sentiments.append(None)
-                        
-                        except Exception as e:
-                            log_message(f"Error procesando texto: {e}", "warning")
-                            sentiments.append(None)
-                    
-                    # Mostrar progreso
-                    progress = min((i + batch_size) / len(df), 1.0)
-                    prog.progress(progress, text=f"Procesado {min(i+batch_size, len(df))}/{len(df)}...")
-                
-                df['sentiment'] = sentiments
-                st.session_state.df = df
-                log_message(f"Sentimiento analizado en {len(df)} posts")
+                df["sentiment"] = sentiments
+                st.session_state["df"] = df
+                log_message(f"Sentimiento analizado en {len(df)} posts con DeepSeek API")
             
             except Exception as e:
-                st.info(f"No se pudo aplicar análisis de sentimiento: {e}")
+                st.info(f"ℹ️ No se pudo aplicar análisis de sentimiento: {e}")
                 log_message(f"Error en sentimiento: {e}", "warning")
+    
     # MÉTRICAS RESUMEN
     total = len(df)
     likes = int(df.get("likes", pd.Series(dtype="float")).fillna(0).sum())
@@ -1330,7 +1345,6 @@ Respuesta:"""
     users = df["username"].nunique() if "username" in df.columns else 0
     
     st.header("📈 Resumen de métricas")
-    
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("📊 Posts", f"{total:,}")
     col2.metric("👥 Usuarios", f"{users:,}")
@@ -1341,7 +1355,6 @@ Respuesta:"""
     
     # VISUALIZACIONES
     st.header("📊 Visualizaciones")
-    
     viz_tabs = st.tabs(["📅 Temporal", "😊 Sentimiento", "☁️ Nube de palabras"])
     
     # Tab 1: Temporal
@@ -1353,7 +1366,6 @@ Respuesta:"""
             with col_hour:
                 st.subheader("Posts por hora del día")
                 by_hour = df["created_at_cl"].dt.hour.value_counts().sort_index().rename("posts")
-                
                 fig1, ax1 = plt.subplots(figsize=(8, 4))
                 ax1.plot(by_hour.index, by_hour.values, marker="o", linewidth=2, color="#1f77b4")
                 ax1.set_xlabel("Hora (Chile)", fontsize=11)
@@ -1369,7 +1381,6 @@ Respuesta:"""
             with col_day:
                 st.subheader("Posts por día")
                 df_valid = df[df["created_at_cl"].notna()].copy()
-                
                 if not df_valid.empty:
                     df_valid["fecha_cl"] = floor_day_local_safe(df_valid["created_at_cl"])
                     by_day = df_valid.groupby("fecha_cl").size().rename("posts").sort_index()
@@ -1395,8 +1406,8 @@ Respuesta:"""
                         xticks_labels = [by_day.index[i].strftime("%d/%m") for i in xticks_pos]
                         ax2.set_xticks(xticks_pos)
                         ax2.set_xticklabels(xticks_labels, rotation=45, ha="right")
-                        
                         ax2.grid(True, alpha=0.3, axis="y", linestyle="--")
+                        
                         plt.tight_layout()
                         st.pyplot(fig2)
                         plt.close()
@@ -1411,15 +1422,13 @@ Respuesta:"""
             with col_pie:
                 st.subheader("Distribución de sentimiento")
                 dist = df["sentiment"].dropna().value_counts()
-                
                 fig3, ax3 = plt.subplots(figsize=(6, 6))
                 colors = {"POS": "#2ecc71", "NEG": "#e74c3c", "NEU": "#95a5a6"}
                 pie_colors = [colors.get(label, "#3498db") for label in dist.index]
-                
                 ax3.pie(
-                    dist.values, 
-                    labels=dist.index, 
-                    autopct="%1.1f%%", 
+                    dist.values,
+                    labels=dist.index,
+                    autopct="%1.1f%%",
                     startangle=90,
                     colors=pie_colors,
                     textprops={"fontsize": 11}
@@ -1433,16 +1442,13 @@ Respuesta:"""
             with col_bar:
                 st.subheader("Conteo por sentimiento")
                 fig4, ax4 = plt.subplots(figsize=(6, 6))
-                
                 colors_bar = [colors.get(label, "#3498db") for label in dist.index]
                 ax4.barh(dist.index, dist.values, color=colors_bar, alpha=0.8)
                 ax4.set_xlabel("Cantidad de posts", fontsize=11)
                 ax4.set_title("Posts por categoría de sentimiento", fontsize=12, fontweight="bold")
                 ax4.grid(True, alpha=0.3, axis="x", linestyle="--")
-                
                 for i, (label, value) in enumerate(zip(dist.index, dist.values)):
                     ax4.text(value + max(dist.values)*0.01, i, f"{value:,}", va="center", fontsize=10)
-                
                 plt.tight_layout()
                 st.pyplot(fig4)
                 plt.close()
@@ -1469,7 +1475,7 @@ Respuesta:"""
         show_cols = st.multiselect(
             "Columnas a mostrar",
             options=df.columns.tolist(),
-            default=[c for c in ["platform", "created_at_cl", "username", "text", "likes", "shares", "comments"] if c in df.columns]
+            default=[c for c in ["platform", "created_at_cl", "username", "text", "likes", "shares", "comments", "sentiment"] if c in df.columns]
         )
     
     with col_filter2:
@@ -1526,7 +1532,7 @@ else:
     
     - **Múltiples plataformas**: X (Twitter), Instagram, Facebook, TikTok
     - **Búsqueda flexible**: Por temática o por usuario/perfil
-    - **Análisis avanzado**: Sentimiento, tendencias temporales, nube de palabras
+    - **Análisis avanzado**: Sentimiento (DeepSeek API), tendencias temporales, nube de palabras
     - **Exportación**: Descarga resultados en CSV o Excel
     - **Manejo robusto de errores**: Reintentos automáticos y fallbacks
     
@@ -1536,7 +1542,15 @@ else:
     2. **Instagram**: Puedes ingresar usernames o URLs completas
     3. **Facebook**: Las búsquedas temáticas pueden tardar más tiempo
     4. **Límites**: Ajusta según necesidad (más posts = más tiempo de procesamiento)
+    
+    ### 🧠 Análisis de Sentimiento (DeepSeek)
+    
+    - **Modelos**: POS (Positivo), NEG (Negativo), NEU (Neutral)
+    - **API**: DeepSeek Chat v3
+    - **Requisito**: Debes configurar `DEEPSEEK_API_KEY` en tu `.env`
+    - **Costo**: Por tokens consumidos en la API
     """)
-
-st.divider()
-st.caption(f"Social Listening Pro • {BUILD_TAG} • Desarrollado para análisis profesional de redes sociales")
+    
+    st.divider()
+    
+    st.caption(f"Social Listening Pro • {BUILD_TAG} • Desarrollado para análisis profesional de redes sociales")
