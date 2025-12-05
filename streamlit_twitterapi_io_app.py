@@ -414,7 +414,7 @@ Respuesta:"""
 def analyze_emotions_deepseek(texts: List[str], batch_size: int = 10, progress_cb: Optional[Callable] = None) -> List[str]:
     """
     Analiza emociones usando DeepSeek API
-    Retorna lista con valores: JOY, ANGER, FEAR, SADNESS, DISGUST, SURPRISE, NEUTRAL
+    Retorna lista con valores: RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA, NEUTRAL
     """
     deepseek_key = env("DEEPSEEK_API_KEY")
     if not deepseek_key:
@@ -434,7 +434,7 @@ def analyze_emotions_deepseek(texts: List[str], batch_size: int = 10, progress_c
             
             for text_idx, text in enumerate(batch):
                 try:
-                    prompt = f"""Analiza la emoción predominante del siguiente texto y responde SOLO con UNA de estas opciones: JOY, ANGER, FEAR, SADNESS, DISGUST, SURPRISE, NEUTRAL
+                    prompt = f"""Analiza la emoción predominante del siguiente texto y responde SOLO con UNA de estas opciones: RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA, NEUTRAL
 
 Texto: {text}
 
@@ -455,7 +455,7 @@ Respuesta:"""
                         result = response.json()
                         emotion = result['choices'][0]['message']['content'].strip().upper()
                         
-                        if emotion in ["JOY", "ANGER", "FEAR", "SADNESS", "DISGUST", "SURPRISE", "NEUTRAL"]:
+                        if emotion in ["RISA", "IRA", "MIEDO", "TRISTEZA", "DISGUSTO", "SORPRESA", "NEUTRAL"]:
                             emotions.append(emotion)
                         else:
                             log_message(f"Respuesta inválida: {emotion}, asignando NEUTRAL", "warning")
@@ -1303,7 +1303,7 @@ with st.sidebar:
     emotions = st.checkbox(
         "😊 Analizar emociones (Ekman 6)",
         value=st.session_state["params"].get("emotions", False),
-        help="JOY, ANGER, FEAR, SADNESS, DISGUST, SURPRISE - Requiere DEEPSEEK_API_KEY"
+        help="RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA - Requiere DEEPSEEK_API_KEY"
     )
     
     debug = st.checkbox("🔧 Modo debug", value=False)
@@ -1712,12 +1712,12 @@ if df is not None and not df.empty:
                     dist_emo = df["emotion"].dropna().value_counts()
                     fig5, ax5 = plt.subplots(figsize=(6, 6))
                     colors_emo = {
-                        "JOY": "#f1c40f",
-                        "ANGER": "#e74c3c",
-                        "FEAR": "#9b59b6",
-                        "SADNESS": "#3498db",
-                        "DISGUST": "#1abc9c",
-                        "SURPRISE": "#e67e22",
+                        "RISA": "#f1c40f",
+                        "IRA": "#e74c3c",
+                        "MIEDO": "#9b59b6",
+                        "TRISTEZA": "#3498db",
+                        "DISGUSTO": "#1abc9c",
+                        "SORPRESA": "#e67e22",
                         "NEUTRAL": "#95a5a6"
                     }
                     pie_colors_emo = [colors_emo.get(label, "#34495e") for label in dist_emo.index]
@@ -1866,7 +1866,7 @@ else:
     - **Búsqueda flexible**: Por temática o por usuario/perfil
     - **Análisis avanzado**: 
       - 🧠 **Sentimiento** (POS/NEG/NEU)
-      - 😊 **Emociones** (JOY, ANGER, FEAR, SADNESS, DISGUST, SURPRISE)
+      - 😊 **Emociones** (RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA)
       - 🚨 **Detección de crisis** automática
       - 🏷️ **Extracción de temas** principales
     - **Exportación**: Descarga resultados en CSV o Excel
