@@ -1314,6 +1314,17 @@ with col_clear:
 # ============================================================================
 # EJECUCIÓN DE BÚSQUEDA
 # ============================================================================
+api_x = st.sidebar.text_input(
+    "API Key twitterapi.io (X)",
+    value=env("TWITTERAPI_IO_KEY") or "",
+    type="password",
+)
+
+api_apify = st.sidebar.text_input(
+    "APIFY_TOKEN (Instagram / Facebook / TikTok)",
+    value=env("APIFY_TOKEN") or "",
+    type="password",
+)
 
 if run_btn:
     st.session_state["logs"] = []
