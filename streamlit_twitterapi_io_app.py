@@ -11,9 +11,11 @@ from dotenv import load_dotenv
 from pandas.api.types import is_datetime64tz_dtype
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Callable
+from collections import Counter
 import logging
 import streamlit as st
 import httpx
+
 
 # ============================================================================
 # CONFIGURACIÓN INICIAL
