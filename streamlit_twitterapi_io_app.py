@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any, Callable
 import logging
 import streamlit as st
+import httpx
+
 # ============================================================================
 # CONFIGURACIÓN INICIAL
 # ============================================================================
