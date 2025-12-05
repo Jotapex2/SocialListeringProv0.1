@@ -1305,6 +1305,12 @@ date_range = st.sidebar.date_input(
     value=(d1_default, d2_default),
     help="Fechas en zona horaria de Chile",
 )
+
+col_run, col_clear = st.sidebar.columns(2)
+with col_run:
+    run_btn = st.button("🔍 Buscar", type="primary", use_container_width=True)
+with col_clear:
+    clear_btn = st.button("🧹 Limpiar", use_container_width=True)
 # ============================================================================
 # EJECUCIÓN DE BÚSQUEDA
 # ============================================================================
