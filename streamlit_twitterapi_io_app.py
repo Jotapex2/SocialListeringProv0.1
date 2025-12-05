@@ -1297,8 +1297,14 @@ filter_chile = st.sidebar.checkbox(
 st.sidebar.divider()
 
 today = datetime.now(SCL_TZ).date()
-d1_default = st.session_state["params"].get("d1", today - timedelta(days
+d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
+d2_default = st.session_state["params"].get("d2", today)
 
+date_range = st.sidebar.date_input(
+    "Rango de fechas (CL)",
+    value=(d1_default, d2_default),
+    help="Fechas en zona horaria de Chile",
+)
 # ============================================================================
 # EJECUCIÓN DE BÚSQUEDA
 # ============================================================================
