@@ -1266,104 +1266,38 @@ else:
         help="Separar por coma si son varios",
     )
 
-    
-    lang = st.selectbox(
-        "Idioma (solo X)",
-        ["", "es", "en", "pt"],
-        index={"": 0, "es": 1, "en": 2, "pt": 3}.get(st.session_state["params"].get("lang", "es"), 1)
-    )
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        exclude_rt = st.checkbox(
-            "Excluir RTs [X]",
-            value=st.session_state["params"].get("exclude_rt", True)
-        )
-    with col2:
-        exclude_repl = st.checkbox(
-            "Excluir respuestas [X]",
-            value=st.session_state["params"].get("exclude_repl", True)
-        )
-    
-    filter_chile = st.checkbox(
-        "🇨🇱 Filtrar solo posts de Chile (X)",
-        value=st.session_state["params"].get("filter_chile", False),
-        help="Aplica 'place_country:CL' solo en X/Twitter"
-    )
-    
-    st.divider()
-    
-    today = datetime.now(SCL_TZ).date()
-    d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
-    d2_default = st.session_state["params"].get("d2", today)
-    
-    date_range = st.date_input(
-        "Rango de fechas (CL)",
-        value=(d1_default, d2_default),
-        help="Fechas en zona horaria de Chile"
-    )
-    
-    if isinstance(date_range, tuple) and len(date_range) == 2:
-        d1, d2 = date_range
-    else:
-        d1, d2 = date_range, date_range
-    
-    query_type = st.selectbox(
-        "Orden (X)",
-        ["Latest", "Top"],
-        index=0 if st.session_state["params"].get("query_type", "Latest") == "Latest" else 1
-    )
-    
-    limit = st.slider("Límite de posts", 50, 5000, st.session_state["params"].get("limit", 300), 50)
-    
-    max_words = st.slider("Máx. palabras nube", 50, 500, st.session_state["params"].get("max_words", 200), 25)
-    
-    sentiment = st.checkbox(
-        "🧠 Analizar sentimiento (POS/NEG/NEU)",
-        value=st.session_state["params"].get("sentiment", True),
-        help="Requiere DEEPSEEK_API_KEY"
-    )
-    
-    emotions = st.checkbox(
-        "😊 Analizar emociones (Ekman 6)",
-        value=st.session_state["params"].get("emotions", False),
-        help="RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA - Requiere DEEPSEEK_API_KEY"
-    )
-    
-    debug = st.checkbox("🔧 Modo debug", value=False)
-    
-    st.divider()
-    
-    col_run, col_clear = st.columns(2)
-    with col_run:
-        run_btn = st.button("🔍 Buscar", type="primary", use_container_width=True)
-    with col_clear:
-        clear_btn = st.button("🧹 Limpiar", use_container_width=True)
+# (si usas hashtags_str para IG/TikTok, defínelo aquí)
+hashtags_str = st.sidebar.text_input("Hashtag(s)", value="", help="Para Instagram/TikTok por hashtag")
 
-# PREVIEW
-with st.expander("🔎 Vista previa de consulta"):
-    if platform.startswith("X"):
-        if search_mode == "Por usuario":
-            u = username_input if 'username_input' in locals() else st.session_state["params"].get("username", "")
-            preview_query = compose_query_x_user(u, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
-        else:
-            t = topic if 'topic' in locals() else st.session_state["params"].get("topic", "")
-            preview_query = compose_query_x(t, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
-        st.code(preview_query, language="text")
-    elif platform == "Instagram":
-        st.info(f"IG → {'Perfiles: ' + username_input if search_mode == 'Por usuario' else 'Hashtags: ' + hashtags_str}")
-    elif platform == "TikTok":
-        st.info(f"TikTok → {'Perfiles: ' + username_input if search_mode == 'Por usuario' else 'Hashtags: ' + hashtags_str}")
-    elif platform == "Facebook":
-        st.info(f"FB → {'Páginas/perfiles: ' + username_input if search_mode == 'Por usuario' else 'Búsqueda: ' + topic}")
+# Parámetros X y generales (SIEMPRE, fuera del if/else anterior)
+lang = st.sidebar.selectbox(
+    "Idioma (solo X)",
+    ["", "es", "en", "pt"],
+    index={"": 0, "es": 1, "en": 2, "pt": 3}.get(st.session_state["params"].get("lang", "es"), 1),
+)
 
-# CLEAR
-if clear_btn:
-    st.session_state["df"] = None
-    st.session_state["params"] = {}
-    st.session_state["query_str"] = None
-    st.session_state["logs"] = []
-    st.rerun()
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    exclude_rt = st.sidebar.checkbox(
+        "Excluir RTs [X]",
+        value=st.session_state["params"].get("exclude_rt", True),
+    )
+with col2:
+    exclude_repl = st.sidebar.checkbox(
+        "Excluir respuestas [X]",
+        value=st.session_state["params"].get("exclude_repl", True),
+    )
+
+filter_chile = st.sidebar.checkbox(
+    "🇨🇱 Filtrar solo posts de Chile (X)",
+    value=st.session_state["params"].get("filter_chile", False),
+    help="Aplica 'place_country:CL' solo en X/Twitter",
+)
+
+st.sidebar.divider()
+
+today = datetime.now(SCL_TZ).date()
+d1_default = st.session_state["params"].get("d1", today - timedelta(days
 
 # ============================================================================
 # EJECUCIÓN DE BÚSQUEDA
