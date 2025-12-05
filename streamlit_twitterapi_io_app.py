@@ -1295,6 +1295,7 @@ filter_chile = st.sidebar.checkbox(
 )
 
 st.sidebar.divider()
+
 today = datetime.now(SCL_TZ).date()
 d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
 d2_default = st.session_state["params"].get("d2", today)
@@ -1309,6 +1310,42 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
     d1, d2 = date_range
 else:
     d1, d2 = date_range, date_range
+
+query_type = st.sidebar.selectbox(
+    "Orden (X)",
+    ["Latest", "Top"],
+    index=0 if st.session_state["params"].get("query_type", "Latest") == "Latest" else 1,
+)
+
+limit = st.sidebar.slider(
+    "Límite de posts",
+    50, 5000,
+    st.session_state["params"].get("limit", 300),
+    50,
+)
+
+max_words = st.sidebar.slider(
+    "Máx. palabras nube",
+    50, 500,
+    st.session_state["params"].get("max_words", 200),
+    25,
+)
+
+sentiment = st.sidebar.checkbox(
+    "🧠 Analizar sentimiento (POS/NEG/NEU)",
+    value=st.session_state["params"].get("sentiment", True),
+    help="Requiere DEEPSEEK_API_KEY",
+)
+
+emotions = st.sidebar.checkbox(
+    "😊 Analizar emociones (Ekman 6)",
+    value=st.session_state["params"].get("emotions", False),
+    help="RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA - Requiere DEEPSEEK_API_KEY",
+)
+
+debug = st.sidebar.checkbox("🔧 Modo debug", value=False)
+
+st.sidebar.divider()
 
 col_run, col_clear = st.sidebar.columns(2)
 with col_run:
