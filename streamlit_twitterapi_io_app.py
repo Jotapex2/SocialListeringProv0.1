@@ -999,6 +999,31 @@ def fetch_instagram_hashtags(apify_token: str, hashtags: List[str], limit: int) 
     items = _ig_extract_posts_from_profile_items(items, username_hint=None)
     return normalize_common(items, "instagram")
 
+#Búsqueda x keyword
+def fetch_instagram_keyword_search(apify_token: str, query: str, limit: int) -> pd.DataFrame:
+    """
+    Busca posts de Instagram por keyword usando apify/instagram-scraper.
+    """
+    if not query or not query.strip():
+        return pd.DataFrame()
+
+    payload = {
+        "search": query.strip(),
+        "searchType": "hashtag",   # también puede ser 'place' o 'profile'
+        "resultsType": "posts",
+        "searchLimit": 10,
+        "resultsLimit": int(limit),
+    }
+
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="apify/instagram-scraper",
+        token=apify_token,
+        payload=payload,
+        limit=limit,
+    )
+    return normalize_common(items, "instagram")
+
 def fetch_instagram_user_posts(apify_token: str, usernames: List[str], limit: int) -> pd.DataFrame:
     """Obtiene posts de usuarios de Instagram con múltiples estrategias"""
     users = [u for u in (usernames or []) if u]
@@ -1192,57 +1217,55 @@ def fetch_facebook_user_posts(apify_token: str, usernames: List[str], limit: int
 st.title("📡 Social Listening Pro — X + Instagram + Facebook + TikTok")
 st.markdown("**Análisis avanzado con detección de crisis, sentimiento, emociones y temas**")
 
-# SIDEBAR
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    
-    platform = st.selectbox(
-        "Plataforma",
-        ["X (Twitter)", "Instagram", "Facebook", "TikTok"],
-        index=0
+st.sidebar.header("⚙️ Configuración de búsqueda")
+
+# Plataforma
+platform = st.sidebar.selectbox(
+    "Plataforma",
+    ["X (Twitter)", "Instagram", "Facebook", "TikTok"],
+    index=0,
+)
+
+# Modo de búsqueda según plataforma
+if platform == "Instagram":
+    search_mode = st.sidebar.radio(
+        "Modo de búsqueda",
+        ["Por temática (hashtags)", "Por temática (búsqueda IG)", "Por usuario/perfil"],
+        index=0,
+        horizontal=False,
     )
-    
-    api_x = st.text_input(
-        "API Key twitterapi.io (X)",
-        value=(env("TWITTERAPI_IO_KEY") or ""),
-        type="password"
+elif platform == "Facebook":
+    search_mode = st.sidebar.radio(
+        "Modo de búsqueda",
+        ["Por temática", "Por usuario/perfil"],
+        index=0,
+        horizontal=False,
     )
-    
-    api_apify = st.text_input(
-        "APIFY_TOKEN (Apify)",
-        value=(env("APIFY_TOKEN") or ""),
-        type="password"
-    )
-    
-    st.divider()
-    
-    search_mode = st.radio(
+else:
+    # X y TikTok
+    search_mode = st.sidebar.radio(
         "Modo de búsqueda",
         ["Por temática", "Por usuario"],
-        horizontal=True,
-        index=0
+        index=0,
+        horizontal=False,
     )
-    
-    if search_mode == "Por temática":
-        topic = st.text_area(
-            "Tema / consulta (X/FB)",
-            value=st.session_state["params"].get("topic", "inteligencia artificial Chile"),
-            height=80,
-            help="Para X: usa operadores booleanos (AND, OR, -)"
-        )
-        hashtags_str = st.text_input(
-            "Hashtags (IG/TikTok) sin #, separados por espacio/coma",
-            value=st.session_state["params"].get("hashtags_str", "machinelearning datascience"),
-            help="Ejemplo: machinelearning, datascience, chile"
-        )
+
+# Campos de entrada según modo
+topic = ""
+username_input = ""
+
+if search_mode.startswith("Por temática"):
+    if platform == "Instagram":
+        topic = st.sidebar.text_input("Tema / consulta para Instagram", value="")
     else:
-        username_input = st.text_input(
-            "Usuario(s) / URL(s) (coma o espacio)",
-            value=st.session_state["params"].get("username", ""),
-            help="Ejemplo: @usuario, url_completa, o múltiples separados por coma"
-        )
-    
-    st.divider()
+        topic = st.sidebar.text_input("Tema / consulta", value="")
+else:
+    username_input = st.sidebar.text_input(
+        "Usuario(s) / URL(s)",
+        value="",
+        help="Separar por coma si son varios",
+    )
+
     
     lang = st.selectbox(
         "Idioma (solo X)",
@@ -1386,7 +1409,7 @@ if run_btn:
                 st.error("❌ Falta APIFY_TOKEN")
                 st.stop()
             
-            if search_mode == "Por usuario":
+            if search_mode == "Por usuario/perfil":
                 users = parse_instagram_usernames(username_input)
                 if not users:
                     st.error("❌ Ingresa usuario(s) o URL(s) de Instagram")
@@ -1394,8 +1417,16 @@ if run_btn:
                 
                 prog.progress(0.1, text=f"Procesando {len(users)} usuario(s)...")
                 df = fetch_instagram_user_posts(api_apify, users, limit)
-            else:
-                tags = [t.strip().lstrip("#") for t in re.split(r"[ ,]+", hashtags_str or "") if t.strip()]
+
+            elif search_mode == "Por temática (búsqueda IG)":
+                if not (topic and topic.strip()):
+                    st.error("❌ Ingresa un tema de búsqueda")
+                    st.stop()
+                prog.progress(0.1, text="Buscando en Instagram por keyword...")
+                df = fetch_instagram_keyword_search(api_apify, topic, limit)
+
+            else:  # "Por temática (hashtags)"
+                tags = [t.strip().lstrip("#") for t in re.split(r"[ ,]+", (hashtags_str or topic or "")) if t.strip()]
                 if not tags:
                     st.error("❌ Ingresa al menos un hashtag")
                     st.stop()
@@ -1404,7 +1435,10 @@ if run_btn:
                 df = fetch_instagram_hashtags(api_apify, tags, limit)
             
             df = enforce_date_window(df, d1, d2)
-            st.session_state["query_str"] = f"IG {'users' if search_mode=='Por usuario' else 'hashtags'}"
+            if search_mode.startswith("Por temática"):
+                st.session_state["query_str"] = f"IG temática='{topic}'"
+            else:
+                st.session_state["query_str"] = f"IG users={username_input}"
         
         # TIKTOK
         elif platform == "TikTok":
@@ -1438,7 +1472,7 @@ if run_btn:
                 st.error("❌ Falta APIFY_TOKEN")
                 st.stop()
             
-            if search_mode == "Por usuario":
+            if search_mode == "Por usuario/perfil":
                 users = [u.strip() for u in re.split(r"[ ,]+", username_input or "") if u.strip()]
                 if not users:
                     st.error("❌ Ingresa al menos un usuario o URL")
@@ -1462,6 +1496,7 @@ if run_btn:
             st.stop()
         
         prog.empty()
+
         
         # Resultados
         if df is None or df.empty:
