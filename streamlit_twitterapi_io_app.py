@@ -477,6 +477,7 @@ Respuesta:"""
     
     return emotions
 
+
 # ============================================================================
 # NORMALIZE DATA
 # ============================================================================
@@ -1509,7 +1510,7 @@ if run_btn:
 
 df = st.session_state.get("df")
 
-if df is not None and not df.empty:
+if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
     
     # Análisis de sentimiento
     sentiment_flag = st.session_state["params"].get("sentiment", True)
@@ -1594,14 +1595,11 @@ if df is not None and not df.empty:
     st.header("📊 Visualizaciones")
     
     tabs_list = ["📅 Temporal", "😊 Sentimiento"]
-    
     if "emotion" in df.columns:
         tabs_list.append("🎭 Emociones")
-    
     tabs_list.extend(["🏷️ Temas", "☁️ Nube de palabras"])
     
     viz_tabs = st.tabs(tabs_list)
-    
     tab_idx = 0
     
     # Tab: Temporal
@@ -1701,61 +1699,60 @@ if df is not None and not df.empty:
     
     tab_idx += 1
     
-   # Tab: Emociones (solo si existe)
-if "emotion" in df.columns:
-    with viz_tabs[tab_idx]:
-        if df["emotion"].notna().any():
-            col_pie_emo, col_bar_emo = st.columns([1, 1])
+    # Tab: Emociones (solo si existe)
+    if "emotion" in df.columns:
+        with viz_tabs[tab_idx]:
+            if df["emotion"].notna().any():
+                col_pie_emo, col_bar_emo = st.columns([1, 1])
 
-            # Mapeo de colores por emoción (en español)
-            colors_emo = {
-                "RISA": "#f1c40f",
-                "IRA": "#e74c3c",
-                "MIEDO": "#9b59b6",
-                "TRISTEZA": "#3498db",
-                "DISGUSTO": "#1abc9c",
-                "SORPRESA": "#e67e22",
-                "NEUTRAL": "#95a5a6",
-            }
+                colors_emo = {
+                    "RISA": "#f1c40f",
+                    "IRA": "#e74c3c",
+                    "MIEDO": "#9b59b6",
+                    "TRISTEZA": "#3498db",
+                    "DISGUSTO": "#1abc9c",
+                    "SORPRESA": "#e67e22",
+                    "NEUTRAL": "#95a5a6",
+                }
 
-            dist_emo = df["emotion"].dropna().value_counts()
-            labels = dist_emo.index.tolist()
-            values = dist_emo.values
-            pie_colors_emo = [colors_emo.get(label, "#34495e") for label in labels]
+                dist_emo = df["emotion"].dropna().value_counts()
+                labels = dist_emo.index.tolist()
+                values = dist_emo.values
+                pie_colors_emo = [colors_emo.get(label, "#34495e") for label in labels]
 
-            with col_pie_emo:
-                st.subheader("Distribución de emociones")
-                fig5, ax5 = plt.subplots(figsize=(6, 6))
-                ax5.pie(
-                    values,
-                    labels=labels,          # ya vienen en español: RISA, IRA, etc.
-                    autopct="%1.1f%%",
-                    startangle=90,
-                    colors=pie_colors_emo,
-                    textprops={"fontsize": 10},
-                )
-                ax5.set_title("Emociones detectadas", fontsize=12, fontweight="bold")
-                ax5.axis("equal")
-                plt.tight_layout()
-                st.pyplot(fig5)
-                plt.close()
+                with col_pie_emo:
+                    st.subheader("Distribución de emociones")
+                    fig5, ax5 = plt.subplots(figsize=(6, 6))
+                    ax5.pie(
+                        values,
+                        labels=labels,
+                        autopct="%1.1f%%",
+                        startangle=90,
+                        colors=pie_colors_emo,
+                        textprops={"fontsize": 10},
+                    )
+                    ax5.set_title("Emociones detectadas", fontsize=12, fontweight="bold")
+                    ax5.axis("equal")
+                    plt.tight_layout()
+                    st.pyplot(fig5)
+                    plt.close()
 
-            with col_bar_emo:
-                st.subheader("Conteo por emoción")
-                fig6, ax6 = plt.subplots(figsize=(6, 6))
-                ax6.barh(labels, values, color=pie_colors_emo, alpha=0.8)
-                ax6.set_xlabel("Cantidad de posts", fontsize=11)
-                ax6.set_title("Posts por emoción", fontsize=12, fontweight="bold")
-                ax6.grid(True, alpha=0.3, axis="x", linestyle="--")
-                for i, (label, value) in enumerate(zip(labels, values)):
-                    ax6.text(value + max(values) * 0.01, i, f"{value:,}", va="center", fontsize=10)
-                plt.tight_layout()
-                st.pyplot(fig6)
-                plt.close()
-        else:
-            st.info("ℹ️ No hay datos de emociones disponibles.")
-    tab_idx += 1
-
+                with col_bar_emo:
+                    st.subheader("Conteo por emoción")
+                    fig6, ax6 = plt.subplots(figsize=(6, 6))
+                    ax6.barh(labels, values, color=pie_colors_emo, alpha=0.8)
+                    ax6.set_xlabel("Cantidad de posts", fontsize=11)
+                    ax6.set_title("Posts por emoción", fontsize=12, fontweight="bold")
+                    ax6.grid(True, alpha=0.3, axis="x", linestyle="--")
+                    for i, (label, value) in enumerate(zip(labels, values)):
+                        ax6.text(value + max(values) * 0.01, i, f"{value:,}", va="center", fontsize=10)
+                    plt.tight_layout()
+                    st.pyplot(fig6)
+                    plt.close()
+            else:
+                st.info("ℹ️ No hay datos de emociones disponibles.")
+        tab_idx += 1
+    
     # Tab: Temas
     with viz_tabs[tab_idx]:
         if "text" in df.columns:
