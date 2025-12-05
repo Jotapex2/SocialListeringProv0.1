@@ -261,8 +261,10 @@ def detect_crisis_signals(df: pd.DataFrame, sentiment_col: str = "sentiment",
 # ============================================================================
 
 def extract_topics(texts: List[str], top_n: int = 10) -> Dict[str, int]:
-    """Extrae temas/palabras clave frecuentes"""
-    clean_texts = []
+    """
+    Extrae temas/palabras clave frecuentes
+    """
+    tokens = []
     url_re = re.compile(r"http\S+|www\.\S+", re.I)
     
     for text in texts:
@@ -272,9 +274,9 @@ def extract_topics(texts: List[str], top_n: int = 10) -> Dict[str, int]:
         text = unidecode(text)
         text = re.sub(r"[^a-z\s]", " ", text)
         words = [w for w in text.split() if w not in EXTRA_STOP and len(w) > 3]
-        clean_texts.extend(words)
+        tokens.extend(words)
     
-    counter = Counter(clean_texts)
+    counter = Counter(tokens)
     return dict(counter.most_common(top_n))
 
 # ============================================================================
