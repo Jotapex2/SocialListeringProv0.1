@@ -1,6 +1,6 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# UI: ORIGINAL (Completa con Fechas, Crisis, Topics, Wordcloud, Filtros X)
-# Backend: OPTIMIZADO (Async, Cache, Facebook Fix)
+# Optimizado por "Carmack" Persona - V6.2
+# UI: Español | Fix: Facebook Search Hardened | Feat: Emotions Bar Chart
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
@@ -22,7 +22,7 @@ import logging
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "RRSS-Pro v6.1 - Original UI + Fechas + Async + FB Fix"
+BUILD_TAG = "JP Release v6.2 - FB Hardened + Emotions Bar"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(level=logging.INFO)
@@ -55,7 +55,7 @@ def log_message(msg: str, level: str = "info"):
     else: logger.info(msg)
 
 # ============================================================================
-# LOGIN (ORIGINAL)
+# LOGIN
 # ============================================================================
 
 USERNAME = "Jota"
@@ -102,7 +102,6 @@ async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_token
         return "NEU"
 
 async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
-    """Procesamiento paralelo de Sentimiento"""
     async with httpx.AsyncClient(base_url="https://api.deepseek.com") as client:
         tasks = []
         for text in texts:
@@ -111,7 +110,6 @@ async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
         return await asyncio.gather(*tasks)
 
 async def process_emotions_batch_async(texts: List[str]) -> List[str]:
-    """Procesamiento paralelo de Emociones"""
     async with httpx.AsyncClient(base_url="https://api.deepseek.com") as client:
         tasks = []
         for text in texts:
@@ -140,10 +138,9 @@ def get_apify_items_sync(dataset_id: str, token: str) -> List[Dict]:
         return []
 
 def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
-    """Ejecuta actor con polling no bloqueante (simulado en sync)"""
+    """Ejecuta actor con polling no bloqueante"""
     url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
     try:
-        # Start Run
         r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
         r.raise_for_status()
         run_data = r.json()["data"]
@@ -152,7 +149,6 @@ def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
         log_message(f"Error inicio actor {actor_id}: {e}", "error")
         return []
 
-    # Polling Loop
     start_time = time.time()
     while time.time() - start_time < 300: # 5 min timeout
         time.sleep(ASYNC_POLL_INTERVAL)
@@ -173,34 +169,26 @@ def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
 # ============================================================================
 
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
-    """Filtra DataFrame por ventana de fechas (Restaurado)"""
+    """Filtra DataFrame por ventana de fechas (Versión Robusta con Timestamps)"""
     if df is None or df.empty: return df
-    
-    # Asegurar que existe columna de fecha procesable
-    if "created_at_cl" not in df.columns:
-        if "created_at" in df.columns:
-            # Intentar convertir
-            try:
-                df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
-                df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
-            except:
-                pass
-    
-    if "created_at_cl" not in df.columns:
-        return df
+    if "created_at_cl" not in df.columns: return df
 
     mask = pd.Series(True, index=df.index)
+    series_normalized = df["created_at_cl"].dt.normalize()
+    
     if d1:
-        mask &= df["created_at_cl"].dt.date >= d1
+        ts1 = pd.Timestamp(d1).tz_localize(SCL_TZ)
+        mask &= (series_normalized >= ts1)
+    
     if d2:
-        mask &= df["created_at_cl"].dt.date <= d2
+        ts2 = pd.Timestamp(d2).tz_localize(SCL_TZ)
+        mask &= (series_normalized <= ts2)
     
     filtered = df.loc[mask].copy()
     log_message(f"Filtrado fechas: {len(df)} -> {len(filtered)} posts")
     return filtered
 
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
-    """Versión optimizada de normalización"""
     df = pd.DataFrame(rows)
     if df.empty: return df
 
@@ -228,7 +216,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
         df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
         df["fecha_cl"] = df["created_at_cl"].dt.date
     
-    # Manejo de Username
+    # Username
     if "username" not in df.columns:
         for c in ["ownerUsername", "authorUsername", "username", "author", "pageName"]:
             if c in df.columns:
@@ -264,7 +252,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 # ============================================================================
-# FETCHERS (CACHEADOS + FIX FACEBOOK)
+# FETCHERS (CACHEADOS + FIX FACEBOOK REFORZADO)
 # ============================================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -307,6 +295,11 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
+    """
+    FIX FACEBOOK HARDENED:
+    Usa 'facebook-posts-scraper' exclusivamente.
+    Para búsqueda, navega la URL de búsqueda como si fuera un usuario.
+    """
     payload = {"resultsLimit": limit, "maxPosts": limit}
     actor = "apify/facebook-posts-scraper"
     
@@ -318,7 +311,8 @@ def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.D
             else: urls.append({"url": f"https://www.facebook.com/{u}"})
         payload["startUrls"] = urls
     else:
-        # Búsqueda directa
+        # TRUCO CARMACK: URL de búsqueda directa en startUrls
+        # Esto evita usar el actor de búsqueda que falla.
         payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}"}]
     
     try:
@@ -366,7 +360,43 @@ def fetch_tiktok_cached(token: str, query: str, limit: int, mode: str) -> pd.Dat
     return normalize_common_optimized(items, "tiktok")
 
 # ============================================================================
-# FUNCIONES AUXILIARES UI (WORDCLOUD, TOPICS, CRISIS)
+# FUNCIONES VISUALES (MATPLOTLIB)
+# ============================================================================
+
+def plot_pie_chart(series, title):
+    if series.empty: return None
+    counts = series.value_counts()
+    fig, ax = plt.subplots(figsize=(6, 6))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    wedges, texts, autotexts = ax.pie(counts, labels=counts.index, autopct='%1.1f%%', startangle=90)
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    return fig
+
+def plot_bar_chart(series, title, color_hex="#3498db"):
+    """Gráfico de barras vertical para categorías (Sentimiento/Emociones)"""
+    if series.empty: return None
+    counts = series.value_counts()
+    
+    fig, ax = plt.subplots(figsize=(6, 5))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    bars = ax.bar(counts.index, counts.values, color=color_hex)
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.set_ylabel("Cantidad")
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    
+    # Etiquetas
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f'{height}', xy=(bar.get_x() + bar.get_width()/2, height),
+                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom')
+    plt.tight_layout()
+    return fig
+
+# ============================================================================
+# HELPERS ORIGINALES (WORDCLOUD, TOPICS, CRISIS)
 # ============================================================================
 
 EXTRA_STOP = {"rt","https","http","t","co","amp","si","no","asi","aqui","ahi","ser","estar","haber","hacer","de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"}
@@ -439,7 +469,7 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
     return {"score": min(100, crisis_score), "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
 # ============================================================================
-# QUERY BUILDERS X (RESTAURADOS CON FECHAS)
+# QUERY BUILDERS X
 # ============================================================================
 
 def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
@@ -449,7 +479,6 @@ def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
     if exclude_rt: q += " -is:retweet"
     if exclude_repl: q += " -is:reply"
     if filter_chile: q += " place_country:CL"
-    # Filtrado en Query
     if d1: q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2: q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
     return q
@@ -461,13 +490,12 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
     if exclude_rt: q += " -is:retweet"
     if exclude_repl: q += " -is:reply"
     if filter_chile: q += " place_country:CL"
-    # Filtrado en Query
     if d1: q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2: q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
     return q
 
 # ============================================================================
-# INTERFAZ STREAMLIT (ORIGINAL)
+# INTERFAZ STREAMLIT
 # ============================================================================
 
 st.title("📡 Social Listening Pro — X + Instagram + Facebook + TikTok")
@@ -475,10 +503,8 @@ st.markdown("**Análisis avanzado con detección de crisis, sentimiento, emocion
 
 st.sidebar.header("⚙️ Configuración de búsqueda")
 
-# Plataforma
 platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"], index=0)
 
-# Modos
 if platform == "Instagram":
     search_mode = st.sidebar.radio("Modo de búsqueda", ["Por temática (hashtags)", "Por temática (búsqueda IG)", "Por usuario/perfil"])
 elif platform == "Facebook":
@@ -498,7 +524,6 @@ if search_mode.startswith("Por temática"):
 else:
     username_input = st.sidebar.text_input("Usuario(s) / URL(s)", help="Separar por coma")
 
-# Filtros X
 lang = st.sidebar.selectbox("Idioma (solo X)", ["", "es", "en", "pt"], index=1)
 col1, col2 = st.sidebar.columns(2)
 exclude_rt = col1.checkbox("Excluir RTs [X]", value=True)
@@ -507,17 +532,15 @@ filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo posts de Chile (X)")
 
 st.sidebar.divider()
 
-# --- SELECTOR DE FECHAS (RESTAURADO) ---
 today = datetime.now(SCL_TZ).date()
 d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
 d2_default = st.session_state["params"].get("d2", today)
 
 date_range = st.sidebar.date_input("Rango de fechas (CL)", value=(d1_default, d2_default))
-
 if isinstance(date_range, tuple) and len(date_range) == 2:
     d1, d2 = date_range
 else:
-    d1, d2 = date_range, date_range # Fallback por si la selección está incompleta
+    d1, d2 = date_range, date_range
 
 limit = st.sidebar.slider("Límite de posts", 50, 5000, 300)
 max_words = st.sidebar.slider("Máx. palabras nube", 50, 500, 200)
@@ -528,7 +551,6 @@ emotions = st.sidebar.checkbox("😊 Analizar emociones (Ekman 6)", value=False)
 st.sidebar.divider()
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
-# Credenciales
 api_x = st.sidebar.text_input("API Key twitterapi.io (X)", value=env("TWITTERAPI_IO_KEY"), type="password")
 api_apify = st.sidebar.text_input("APIFY_TOKEN", value=env("APIFY_TOKEN"), type="password")
 
@@ -542,7 +564,7 @@ if run_btn:
     df = pd.DataFrame()
     
     try:
-        # 1. FETCHING (USANDO LAS VERSIONES CACHED)
+        # 1. FETCHING
         if platform.startswith("X"):
             if not api_x: st.error("Falta API Key X"); st.stop()
             if search_mode == "Por usuario":
@@ -569,18 +591,17 @@ if run_btn:
             q_tt = username_input if tt_mode == "user" else topic
             df = fetch_tiktok_cached(api_apify, q_tt, limit, tt_mode)
 
-        # 2. FILTRADO DE FECHAS ESTRICTO
-        # Importante para Apify que a veces trae resultados fuera de rango
+        # 2. FILTRADO FECHAS (FIXED)
         df = enforce_date_window(df, d1, d2)
 
-        prog.progress(0.5, text="Datos obtenidos y filtrados. Procesando IA...")
+        prog.progress(0.5, text="Datos obtenidos. Procesando IA...")
 
         if df.empty:
             prog.empty()
             st.warning("⚠️ No se encontraron resultados en este rango de fechas.")
             st.stop()
 
-        # 3. ANÁLISIS IA (OPTIMIZADO ASYNC)
+        # 3. IA ASYNC
         if "text" in df.columns:
             texts = df["text"].tolist()
             if sentiment:
@@ -603,7 +624,7 @@ if run_btn:
         log_message(f"Crash: {e}", "error")
 
 # ============================================================================
-# RENDERIZADO DE RESULTADOS (ORIGINAL)
+# RESULTADOS
 # ============================================================================
 
 df = st.session_state.get("df")
@@ -641,12 +662,12 @@ if df is not None and not df.empty:
     
     with tabs[0]: # Temporal
         if "created_at_cl" in df.columns:
-            # Gráfico de barras por día (Matplotlib original style)
             df_t = df.copy()
             df_t["fecha"] = df_t["created_at_cl"].dt.date
             by_day = df_t["fecha"].value_counts().sort_index()
             if not by_day.empty:
                 fig, ax = plt.subplots(figsize=(10,4))
+                fig.patch.set_facecolor('white')
                 ax.bar(by_day.index.astype(str), by_day.values, color="#2ca02c")
                 ax.set_title("Evolución diaria")
                 plt.xticks(rotation=45)
@@ -657,18 +678,18 @@ if df is not None and not df.empty:
             c1, c2 = st.columns(2)
             dist = df["sentiment"].value_counts()
             with c1:
-                fig, ax = plt.subplots()
-                ax.pie(dist, labels=dist.index, autopct="%1.1f%%", colors=["#2ecc71","#e74c3c","#95a5a6"])
-                st.pyplot(fig)
+                st.pyplot(plot_pie_chart(df["sentiment"], "Distribución"))
             with c2:
-                st.bar_chart(dist)
+                st.pyplot(plot_bar_chart(df["sentiment"], "Conteo", "#2ecc71"))
 
     with tabs[2]: # Emociones
         if "emotion" in df.columns:
-            dist_e = df["emotion"].value_counts()
-            fig, ax = plt.subplots()
-            ax.pie(dist_e, labels=dist_e.index, autopct="%1.1f%%")
-            st.pyplot(fig)
+            c1, c2 = st.columns(2)
+            with c1:
+                st.pyplot(plot_pie_chart(df["emotion"], "Distribución"))
+            with c2:
+                # AQUÍ ESTÁ EL NUEVO GRÁFICO DE BARRAS
+                st.pyplot(plot_bar_chart(df["emotion"], "Conteo por Emoción", "#9b59b6"))
 
     with tabs[3]: # Temas
         if "text" in df.columns:
@@ -680,7 +701,7 @@ if df is not None and not df.empty:
             blob = clean_texts(df["text"])
             wordcloud_from_blob(blob, max_words)
 
-    # Tabla y Export
+    # Export
     st.header("📋 Datos Detallados")
     st.dataframe(df, use_container_width=True)
     
