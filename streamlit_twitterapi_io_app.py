@@ -1,5 +1,5 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# UI: ORIGINAL (Completa con Crisis, Topics, Wordcloud, Filtros X)
+# UI: ORIGINAL (Completa con Fechas, Crisis, Topics, Wordcloud, Filtros X)
 # Backend: OPTIMIZADO (Async, Cache, Facebook Fix)
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
@@ -22,7 +22,7 @@ import logging
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "RRSS-Pro v6.0 - Original UI + Async Core + FB Fix"
+BUILD_TAG = "RRSS-Pro v6.1 - Original UI + Fechas + Async + FB Fix"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(level=logging.INFO)
@@ -77,7 +77,7 @@ if "logged_in" not in st.session_state or not st.session_state['logged_in']:
     st.stop()
 
 # ============================================================================
-# MOTOR ASÍNCRONO (ASYNC CORE - NUEVO)
+# MOTOR ASÍNCRONO (ASYNC CORE)
 # ============================================================================
 
 async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_tokens: int = 10) -> str:
@@ -119,7 +119,7 @@ async def process_emotions_batch_async(texts: List[str]) -> List[str]:
             tasks.append(async_fetch_deepseek(client, prompt, 15))
         return await asyncio.gather(*tasks)
 
-# Wrappers síncronos para mantener compatibilidad con la UI original
+# Wrappers síncronos
 def analyze_sentiment_deepseek_optimized(texts: List[str]) -> List[str]:
     return asyncio.run(process_sentiment_batch_async(texts))
 
@@ -169,15 +169,41 @@ def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
     return []
 
 # ============================================================================
-# NORMALIZACIÓN & TOOLS (ORIGINALES + OPTIMIZADOS)
+# NORMALIZACIÓN & TOOLS
 # ============================================================================
 
+def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
+    """Filtra DataFrame por ventana de fechas (Restaurado)"""
+    if df is None or df.empty: return df
+    
+    # Asegurar que existe columna de fecha procesable
+    if "created_at_cl" not in df.columns:
+        if "created_at" in df.columns:
+            # Intentar convertir
+            try:
+                df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+                df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
+            except:
+                pass
+    
+    if "created_at_cl" not in df.columns:
+        return df
+
+    mask = pd.Series(True, index=df.index)
+    if d1:
+        mask &= df["created_at_cl"].dt.date >= d1
+    if d2:
+        mask &= df["created_at_cl"].dt.date <= d2
+    
+    filtered = df.loc[mask].copy()
+    log_message(f"Filtrado fechas: {len(df)} -> {len(filtered)} posts")
+    return filtered
+
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
-    """Versión optimizada de normalización para mantener columnas críticas"""
+    """Versión optimizada de normalización"""
     df = pd.DataFrame(rows)
     if df.empty: return df
 
-    # Mapeo de columnas para asegurar compatibilidad con la UI original
     col_map = {
         "text": ["caption", "description", "title", "text", "message", "postText"],
         "likes": ["likeCount", "likesCount", "diggCount", "likes", "reactionCount"],
@@ -196,7 +222,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
             if target not in df.columns:
                 df[target] = 0 if target in ["likes", "comments", "shares", "views"] else None
 
-    # Manejo de Fechas (Crucial para timeline)
+    # Manejo de Fechas
     if "created_at" in df.columns:
         df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
         df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
@@ -209,11 +235,9 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
                 df["username"] = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
                 break
     
-    # Limpieza de texto
     if "text" in df.columns:
         df["text"] = df["text"].fillna("").astype(str)
         
-    # Asegurar numéricos
     for col in ["likes", "comments", "shares", "views"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -221,7 +245,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
     df["platform"] = platform
     return df
 
-# Helper para exportar Excel (Original)
+# Export Excel
 def _drop_tz_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
     for c in df2.columns:
@@ -245,21 +269,17 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
-    """Fetcher de X con caché y paginación interna"""
     headers = {"x-api-key": api_key}
     all_rows = []
     cursor = None
-    
-    # Paginación para alcanzar el límite
     max_loops = (limit // 20) + 5 
     
     for _ in range(max_loops):
         params = {"query": query, "queryType": "Latest"}
         if cursor: params["cursor"] = cursor
-        
         try:
             r = requests.get(API_URL_X, headers=headers, params=params, timeout=20)
-            if r.status_code == 429: # Rate limit
+            if r.status_code == 429: 
                 time.sleep(5)
                 continue
             if r.status_code != 200: break
@@ -271,36 +291,26 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
             for t in tweets:
                 u = t.get("author", {})
                 all_rows.append({
-                    "id": t.get("id"),
-                    "created_at": t.get("createdAt"),
-                    "username": u.get("userName"),
-                    "text": t.get("text"),
-                    "likes": t.get("likeCount", 0),
-                    "comments": t.get("replyCount", 0),
-                    "shares": t.get("retweetCount", 0),
-                    "views": t.get("viewCount", 0),
+                    "id": t.get("id"), "created_at": t.get("createdAt"),
+                    "username": u.get("userName"), "text": t.get("text"),
+                    "likes": t.get("likeCount", 0), "comments": t.get("replyCount", 0),
+                    "shares": t.get("retweetCount", 0), "views": t.get("viewCount", 0),
                     "url": t.get("url"),
                 })
             
             if len(all_rows) >= limit: break
             cursor = data.get("next_cursor") if data.get("has_next_page") else None
             if not cursor: break
-            
         except Exception: break
         
     return normalize_common_optimized(all_rows, "x")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
-    """
-    FIX FACEBOOK: Prioriza apify/facebook-posts-scraper.
-    Detecta si 'query' es URL o Palabra clave.
-    """
     payload = {"resultsLimit": limit, "maxPosts": limit}
-    actor = "apify/facebook-posts-scraper" # El robusto por defecto
+    actor = "apify/facebook-posts-scraper"
     
     if mode == "user":
-        # Manejo inteligente de URLs de usuario
         urls = []
         for u in query.split(","):
             u = u.strip()
@@ -308,34 +318,28 @@ def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.D
             else: urls.append({"url": f"https://www.facebook.com/{u}"})
         payload["startUrls"] = urls
     else:
-        # Modo Búsqueda (Keyword)
-        # La búsqueda por keyword es delicada. Usamos la URL de búsqueda.
+        # Búsqueda directa
         payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}"}]
     
     try:
         items = run_apify_actor(actor, token, payload)
-        # Facebook necesita normalización extra a veces
         normalized = []
         for i in items:
             normalized.append({
                 "id": i.get("postId"),
                 "text": i.get("text") or i.get("postText") or i.get("message"),
                 "username": i.get("user", {}).get("name"),
-                "likes": i.get("likes", 0),
-                "comments": i.get("comments", 0),
-                "shares": i.get("shares", 0),
-                "url": i.get("url") or i.get("postUrl"),
+                "likes": i.get("likes", 0), "comments": i.get("comments", 0),
+                "shares": i.get("shares", 0), "url": i.get("url") or i.get("postUrl"),
                 "created_at": i.get("time") or i.get("timestamp")
             })
         return normalize_common_optimized(normalized, "facebook")
-    except Exception:
-        return pd.DataFrame()
+    except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_instagram_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
     actor = ""
     payload = {"resultsLimit": limit, "resultsType": "posts"}
-    
     if mode == "hashtag":
         actor = "apify/instagram-hashtag-scraper"
         payload["hashtags"] = [h.strip().replace("#","") for h in query.split(",")]
@@ -343,7 +347,7 @@ def fetch_instagram_cached(token: str, query: str, limit: int, mode: str) -> pd.
         actor = "apify/instagram-scraper"
         payload["search"] = query
         payload["searchType"] = "hashtag"
-    else: # user
+    else:
         actor = "apify/instagram-post-scraper"
         payload["usernames"] = [u.strip() for u in query.split(",")]
         
@@ -362,14 +366,10 @@ def fetch_tiktok_cached(token: str, query: str, limit: int, mode: str) -> pd.Dat
     return normalize_common_optimized(items, "tiktok")
 
 # ============================================================================
-# FUNCIONES AUXILIARES DE LA UI ORIGINAL (WORDCLOUD, TOPICS, CRISIS)
+# FUNCIONES AUXILIARES UI (WORDCLOUD, TOPICS, CRISIS)
 # ============================================================================
 
-EXTRA_STOP = {
-    "rt","https","http","t","co","amp","si","no","asi","aqui","ahi","ser","estar","haber","hacer",
-    "de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como",
-    "mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"
-}
+EXTRA_STOP = {"rt","https","http","t","co","amp","si","no","asi","aqui","ahi","ser","estar","haber","hacer","de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"}
 STOP = STOPWORDS.union(EXTRA_STOP)
 
 def clean_texts(texts: pd.Series) -> str:
@@ -387,7 +387,7 @@ def clean_texts(texts: pd.Series) -> str:
 
 def wordcloud_from_blob(blob: str, max_words: int = 200):
     if not blob.strip():
-        st.info("No hay texto suficiente para la nube de palabras.")
+        st.info("No hay texto suficiente.")
         return
     wc = WordCloud(width=1200, height=500, background_color="white", stopwords=STOP, max_words=max_words, colormap="viridis").generate(blob)
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -420,14 +420,12 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
     signals = []
     crisis_score = 0
     
-    # 1. Sentimiento negativo
     if "sentiment" in df.columns:
         neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
         if neg_ratio > 0.3:
             signals.append(f"Sentimiento negativo alto: {neg_ratio*100:.1f}%")
             crisis_score += 25
     
-    # 2. Keywords
     keywords = CRISIS_KEYWORDS.get(lang, CRISIS_KEYWORDS["es"])
     if "text" in df.columns:
         crisis_posts = df[df["text"].str.lower().str.contains("|".join(keywords), regex=True, na=False)]
@@ -438,29 +436,34 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
         crisis_posts = pd.DataFrame()
         
     severity = "critical" if crisis_score >= 60 else "high" if crisis_score >= 40 else "medium" if crisis_score >= 20 else "low"
-    
     return {"score": min(100, crisis_score), "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
 # ============================================================================
-# COMPOSICIÓN DE QUERY X (ORIGINAL)
+# QUERY BUILDERS X (RESTAURADOS CON FECHAS)
 # ============================================================================
 
-def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, filter_chile: bool) -> str:
+def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
     q = topic.strip()
     if not q.startswith("("): q = f"({q})"
     if lang: q += f" lang:{lang}"
     if exclude_rt: q += " -is:retweet"
     if exclude_repl: q += " -is:reply"
     if filter_chile: q += " place_country:CL"
+    # Filtrado en Query
+    if d1: q += f" since:{d1.isoformat()}_00:00:00_UTC"
+    if d2: q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
     return q
 
-def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool, filter_chile: bool) -> str:
+def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
     u = username.strip().lstrip("@")
     q = f"from:{u}"
     if lang: q += f" lang:{lang}"
     if exclude_rt: q += " -is:retweet"
     if exclude_repl: q += " -is:reply"
     if filter_chile: q += " place_country:CL"
+    # Filtrado en Query
+    if d1: q += f" since:{d1.isoformat()}_00:00:00_UTC"
+    if d2: q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
     return q
 
 # ============================================================================
@@ -475,7 +478,7 @@ st.sidebar.header("⚙️ Configuración de búsqueda")
 # Plataforma
 platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"], index=0)
 
-# Modos (Lógica Original)
+# Modos
 if platform == "Instagram":
     search_mode = st.sidebar.radio("Modo de búsqueda", ["Por temática (hashtags)", "Por temática (búsqueda IG)", "Por usuario/perfil"])
 elif platform == "Facebook":
@@ -503,6 +506,19 @@ exclude_repl = col2.checkbox("Excluir respuestas [X]", value=True)
 filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo posts de Chile (X)")
 
 st.sidebar.divider()
+
+# --- SELECTOR DE FECHAS (RESTAURADO) ---
+today = datetime.now(SCL_TZ).date()
+d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
+d2_default = st.session_state["params"].get("d2", today)
+
+date_range = st.sidebar.date_input("Rango de fechas (CL)", value=(d1_default, d2_default))
+
+if isinstance(date_range, tuple) and len(date_range) == 2:
+    d1, d2 = date_range
+else:
+    d1, d2 = date_range, date_range # Fallback por si la selección está incompleta
+
 limit = st.sidebar.slider("Límite de posts", 50, 5000, 300)
 max_words = st.sidebar.slider("Máx. palabras nube", 50, 500, 200)
 
@@ -530,14 +546,13 @@ if run_btn:
         if platform.startswith("X"):
             if not api_x: st.error("Falta API Key X"); st.stop()
             if search_mode == "Por usuario":
-                qx = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, filter_chile)
+                qx = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
             else:
-                qx = compose_query_x(topic, lang, exclude_rt, exclude_repl, filter_chile)
+                qx = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
             df = fetch_x_cached(api_x, qx, limit)
             
         elif platform == "Facebook":
             if not api_apify: st.error("Falta Token Apify"); st.stop()
-            # Mapeo a parámetros del fix
             fb_mode = "user" if "usuario" in search_mode else "search"
             q_fb = username_input if fb_mode == "user" else topic
             df = fetch_facebook_cached(api_apify, q_fb, limit, fb_mode)
@@ -554,14 +569,18 @@ if run_btn:
             q_tt = username_input if tt_mode == "user" else topic
             df = fetch_tiktok_cached(api_apify, q_tt, limit, tt_mode)
 
-        prog.progress(0.5, text="Datos obtenidos. Procesando IA...")
+        # 2. FILTRADO DE FECHAS ESTRICTO
+        # Importante para Apify que a veces trae resultados fuera de rango
+        df = enforce_date_window(df, d1, d2)
+
+        prog.progress(0.5, text="Datos obtenidos y filtrados. Procesando IA...")
 
         if df.empty:
             prog.empty()
-            st.warning("⚠️ No se encontraron resultados.")
+            st.warning("⚠️ No se encontraron resultados en este rango de fechas.")
             st.stop()
 
-        # 2. ANÁLISIS IA (OPTIMIZADO ASYNC)
+        # 3. ANÁLISIS IA (OPTIMIZADO ASYNC)
         if "text" in df.columns:
             texts = df["text"].tolist()
             if sentiment:
@@ -575,7 +594,8 @@ if run_btn:
         time.sleep(0.5)
         prog.empty()
         st.session_state["df"] = df
-        st.session_state["params"]["platform"] = platform # Guardar para referencia
+        st.session_state["params"]["d1"] = d1
+        st.session_state["params"]["d2"] = d2
         
     except Exception as e:
         prog.empty()
