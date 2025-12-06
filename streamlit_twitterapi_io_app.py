@@ -1,8 +1,9 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "Carmack" Persona - V5.3 (Restored Features)
-# UI: Español | Features: Pie Charts, Max Words Slider, Granular Search
+# Optimizado por "Carmack" Persona - V5.4 (Definitive Edition)
+# UI: Español | Features: Async Core, Excel Export, Matplotlib Charts (Downloadable)
 
 import os
+import io
 import time
 import asyncio
 import logging
@@ -22,7 +23,7 @@ import pytz
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "Carmack Release v5.3 - Full Features Restored"
+BUILD_TAG = "JP Release v5.4 - Definitive Edition"
 SCL_TZ = pytz.timezone("America/Santiago")
 
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +49,25 @@ def log_message(msg: str, level: str = "info"):
 def env(name: str):
     try: return st.secrets.get(name) or os.getenv(name)
     except: return os.getenv(name)
+
+def to_excel(df):
+    """Convierte DataFrame a Bytes Excel compatible con descarga"""
+    output = io.BytesIO()
+    # Eliminar timezone para compatibilidad con Excel
+    df_export = df.copy()
+    for col in df_export.select_dtypes(include=['datetime64[ns, America/Santiago]', 'datetimetz']).columns:
+        df_export[col] = df_export[col].dt.tz_localize(None)
+    
+    # Fallback por si quedan columnas tz-aware genéricas
+    for col in df_export.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_export[col]):
+            try:
+                df_export[col] = df_export[col].dt.tz_localize(None)
+            except: pass
+
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_export.to_excel(writer, index=False, sheet_name='SocialData')
+    return output.getvalue()
 
 # ============================================================================
 # 3. AUTENTICACIÓN
@@ -218,14 +238,13 @@ def fetch_facebook_data(token, query, mode, limit):
 def fetch_instagram_data(token, query, mode, limit):
     payload = {"resultsLimit": limit, "resultsType": "posts"}
     actor = ""
-    # Lógica restaurada de diferenciación
     if mode == "hashtag":
         actor = "apify/instagram-hashtag-scraper"
         payload["hashtags"] = [query.replace("#","")]
     elif mode == "keyword":
         actor = "apify/instagram-scraper"
         payload["search"] = query
-        payload["searchType"] = "hashtag" # 'hashtag' aquí suele funcionar como búsqueda amplia
+        payload["searchType"] = "hashtag"
     else: # user
         actor = "apify/instagram-post-scraper"
         payload["usernames"] = [query]
@@ -246,28 +265,59 @@ def fetch_tiktok_data(token, query, mode, limit):
     except: return pd.DataFrame()
 
 # ============================================================================
-# 7. VISUALIZACIÓN (PIE CHARTS MATPLOTLIB)
+# 7. VISUALIZACIÓN (MATPLOTLIB)
 # ============================================================================
 
-def plot_pie_chart_matplotlib(series, title):
-    """Genera gráfico de torta con fondo blanco estilo Matplotlib"""
+def plot_pie_chart(series, title):
     if series.empty: return None
     counts = series.value_counts()
     if counts.empty: return None
     
     fig, ax = plt.subplots(figsize=(6, 6))
-    # Fondo blanco explícito
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
     
     wedges, texts, autotexts = ax.pie(
-        counts, 
-        labels=counts.index, 
-        autopct='%1.1f%%', 
-        startangle=90,
+        counts, labels=counts.index, autopct='%1.1f%%', startangle=90,
         textprops=dict(color="black")
     )
     ax.set_title(title, fontsize=12, fontweight='bold', color='black')
+    return fig
+
+def plot_timeline_bar(df):
+    """Gráfico de barras por día usando Matplotlib para ser descargable"""
+    if df.empty or "created_at_cl" not in df.columns: return None
+    
+    # Agrupar por fecha (día)
+    df_plot = df.copy()
+    df_plot['date_only'] = df_plot['created_at_cl'].dt.date
+    daily_counts = df_plot['date_only'].value_counts().sort_index()
+    
+    if daily_counts.empty: return None
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('white')
+    
+    # Plot
+    bars = ax.bar(daily_counts.index.astype(str), daily_counts.values, color="#3498db")
+    
+    ax.set_title("Evolución de Posts por Día", fontsize=12, fontweight='bold')
+    ax.set_ylabel("Cantidad de Posts")
+    ax.set_xlabel("Fecha")
+    plt.xticks(rotation=45, ha='right')
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    
+    # Etiquetas encima de barras
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f'{height}',
+                    xy=(bar.get_x() + bar.get_width() / 2, height),
+                    xytext=(0, 3),  # 3 points vertical offset
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
     return fig
 
 # ============================================================================
@@ -303,19 +353,18 @@ def main():
         query_input = ""
         mode = "search"
         
-        # LOGICA DE INPUTS RESTAURADA
+        # LOGICA DE INPUTS
         if platform == "X (Twitter)":
             mode_sel = st.radio("Modo", ["Palabra Clave", "Usuario (@user)"], key="x_mode")
             mode = "user" if "Usuario" in mode_sel else "keyword"
             query_input = st.text_input("Consulta / Usuario", key="x_query")
         
         elif platform == "Instagram":
-            # Restaurada la opción "Palabra Clave" vs "Hashtag"
             mode_sel = st.radio("Modo", ["Hashtag (#tag)", "Palabra Clave (Búsqueda)", "Usuario (@user)"], key="ig_mode")
             if "Hashtag" in mode_sel: mode = "hashtag"
             elif "Palabra" in mode_sel: mode = "keyword"
             else: mode = "user"
-            query_input = st.text_input("Entrada", help="Ej: seleccion #futbol, escribe 'futbol'", key="ig_query")
+            query_input = st.text_input("Entrada", key="ig_query")
 
         elif platform == "Facebook":
             mode_sel = st.radio("Modo", ["Usuario/Página", "Búsqueda"], key="fb_mode")
@@ -328,8 +377,6 @@ def main():
             query_input = st.text_input("Tag o Usuario", key="tt_query")
 
         limit = st.slider("Máx. Posts", 50, 2000, 200, key="global_limit")
-        
-        # SLIDER DE PALABRAS RESTAURADO
         max_words = st.slider("Máx. palabras nube", 50, 500, 200, key="wc_max_words")
         
         st.divider()
@@ -390,30 +437,58 @@ def main():
             st.dataframe(df, use_container_width=True)
         
         with tab2:
-            # GRÁFICOS RESTAURADOS (TORTA)
+            st.subheader("Análisis Visual")
+            
+            # 1. Timeline (Ahora descargable)
+            if "created_at_cl" in df.columns:
+                fig_time = plot_timeline_bar(df)
+                if fig_time: 
+                    st.pyplot(fig_time)
+            
+            st.divider()
+
+            # 2. Charts de IA
             col1, col2 = st.columns(2)
             with col1:
                 if "sentiment" in df.columns:
-                    fig_sent = plot_pie_chart_matplotlib(df["sentiment"], "Distribución de Sentimiento")
+                    fig_sent = plot_pie_chart(df["sentiment"], "Distribución de Sentimiento")
                     if fig_sent: st.pyplot(fig_sent)
             
             with col2:
                 if "emotion" in df.columns:
-                    fig_emo = plot_pie_chart_matplotlib(df["emotion"], "Distribución de Emociones")
+                    fig_emo = plot_pie_chart(df["emotion"], "Distribución de Emociones")
                     if fig_emo: st.pyplot(fig_emo)
             
             st.divider()
             
+            # 3. Nube
             if "text" in df.columns:
                 text_blob = " ".join(df["text"].astype(str))
                 if len(text_blob) > 50:
-                    # USANDO EL SLIDER DE MÁXIMAS PALABRAS
                     wc = WordCloud(width=800, height=350, background_color="white", max_words=max_words, stopwords=STOPWORDS).generate(text_blob)
                     st.image(wc.to_array(), caption=f"Nube de Palabras (Top {max_words})")
 
         with tab3:
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Descargar CSV", csv, "reporte_social.csv", "text/csv")
+            st.subheader("Exportar Datos")
+            
+            col_d1, col_d2 = st.columns(2)
+            
+            with col_d1:
+                # Exportar CSV
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("📄 Descargar CSV", csv, "reporte_social.csv", "text/csv", use_container_width=True)
+            
+            with col_d2:
+                # Exportar Excel
+                try:
+                    excel_data = to_excel(df)
+                    st.download_button("📊 Descargar Excel", excel_data, "reporte_social.xlsx", 
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                                       use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error generando Excel: {e}")
+
+            st.divider()
             with st.expander("Logs del Sistema"):
                 st.write(st.session_state.get("logs", []))
 
