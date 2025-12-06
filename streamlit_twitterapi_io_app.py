@@ -1,6 +1,6 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "Carmack" Persona - V6.2
-# UI: Español | Fix: Facebook Search Hardened | Feat: Emotions Bar Chart
+# Optimizado por "Carmack" Persona - V6.3
+# UI: Español | Fix: Facebook Date Filter & Sorting | Feat: Permissive Date Logic
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
@@ -22,7 +22,7 @@ import logging
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "JP Release v6.2 - FB Hardened + Emotions Bar"
+BUILD_TAG = "JP Release v6.3 - FB Date Fix"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(level=logging.INFO)
@@ -169,23 +169,33 @@ def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
 # ============================================================================
 
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
-    """Filtra DataFrame por ventana de fechas (Versión Robusta con Timestamps)"""
+    """
+    Filtra DataFrame por ventana de fechas (Versión PERMISIVA).
+    Deja pasar fechas nulas (NaT) para evitar borrar posts de Facebook con fechas mal parseadas.
+    """
     if df is None or df.empty: return df
     if "created_at_cl" not in df.columns: return df
 
     mask = pd.Series(True, index=df.index)
     series_normalized = df["created_at_cl"].dt.normalize()
     
+    # IMPORTANTE: Permitimos que pasen los NaT (Not a Time) con .isna()
+    # Esto salva los posts donde el scraper falló al leer la fecha.
+    
     if d1:
         ts1 = pd.Timestamp(d1).tz_localize(SCL_TZ)
-        mask &= (series_normalized >= ts1)
+        mask &= ((series_normalized >= ts1) | (series_normalized.isna()))
     
     if d2:
         ts2 = pd.Timestamp(d2).tz_localize(SCL_TZ)
-        mask &= (series_normalized <= ts2)
+        mask &= ((series_normalized <= ts2) | (series_normalized.isna()))
     
     filtered = df.loc[mask].copy()
-    log_message(f"Filtrado fechas: {len(df)} -> {len(filtered)} posts")
+    
+    # Logging de depuración para ver cuántos posts se salvan
+    null_dates = filtered["created_at_cl"].isna().sum()
+    log_message(f"Filtrado fechas: {len(df)} -> {len(filtered)} posts (Inc. {null_dates} sin fecha)")
+    
     return filtered
 
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
@@ -296,9 +306,8 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
     """
-    FIX FACEBOOK HARDENED:
-    Usa 'facebook-posts-scraper' exclusivamente.
-    Para búsqueda, navega la URL de búsqueda como si fuera un usuario.
+    FIX FACEBOOK HARDENED V2:
+    - Inyecta filtros de "Recientes" en la URL de búsqueda.
     """
     payload = {"resultsLimit": limit, "maxPosts": limit}
     actor = "apify/facebook-posts-scraper"
@@ -311,9 +320,10 @@ def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.D
             else: urls.append({"url": f"https://www.facebook.com/{u}"})
         payload["startUrls"] = urls
     else:
-        # TRUCO CARMACK: URL de búsqueda directa en startUrls
-        # Esto evita usar el actor de búsqueda que falla.
-        payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}"}]
+        # TRUCO CARMACK V2: URL con filtro RECENT_POSTS_V2 (Base64)
+        # Esto intenta forzar que FB devuelva cosas nuevas
+        recent_filter = "eyJzb3J0X2tleSI6InRECENT_POSTS_V2In0%3D"
+        payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}&filters={recent_filter}"}]
     
     try:
         items = run_apify_actor(actor, token, payload)
@@ -374,20 +384,15 @@ def plot_pie_chart(series, title):
     return fig
 
 def plot_bar_chart(series, title, color_hex="#3498db"):
-    """Gráfico de barras vertical para categorías (Sentimiento/Emociones)"""
     if series.empty: return None
     counts = series.value_counts()
-    
     fig, ax = plt.subplots(figsize=(6, 5))
     fig.patch.set_facecolor('white')
     ax.set_facecolor('white')
-    
     bars = ax.bar(counts.index, counts.values, color=color_hex)
     ax.set_title(title, fontsize=12, fontweight='bold')
     ax.set_ylabel("Cantidad")
     ax.grid(axis='y', linestyle='--', alpha=0.3)
-    
-    # Etiquetas
     for bar in bars:
         height = bar.get_height()
         ax.annotate(f'{height}', xy=(bar.get_x() + bar.get_width()/2, height),
@@ -591,14 +596,14 @@ if run_btn:
             q_tt = username_input if tt_mode == "user" else topic
             df = fetch_tiktok_cached(api_apify, q_tt, limit, tt_mode)
 
-        # 2. FILTRADO FECHAS (FIXED)
+        # 2. FILTRADO FECHAS (PERMISIVO)
         df = enforce_date_window(df, d1, d2)
 
         prog.progress(0.5, text="Datos obtenidos. Procesando IA...")
 
         if df.empty:
             prog.empty()
-            st.warning("⚠️ No se encontraron resultados en este rango de fechas.")
+            st.warning("⚠️ No se encontraron resultados en este rango.")
             st.stop()
 
         # 3. IA ASYNC
@@ -688,7 +693,6 @@ if df is not None and not df.empty:
             with c1:
                 st.pyplot(plot_pie_chart(df["emotion"], "Distribución"))
             with c2:
-                # AQUÍ ESTÁ EL NUEVO GRÁFICO DE BARRAS
                 st.pyplot(plot_bar_chart(df["emotion"], "Conteo por Emoción", "#9b59b6"))
 
     with tabs[3]: # Temas
