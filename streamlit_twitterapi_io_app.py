@@ -1,6 +1,6 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "Carmack" Persona - V6.3
-# UI: Español | Fix: Facebook Date Filter & Sorting | Feat: Permissive Date Logic
+# Optimizado por "Carmack" Persona - V6.5
+# UI: Español | Feat: Secure Auth (Env Vars) | Dual Apify | FB Fix
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from pandas.api.types import is_datetime64tz_dtype
 from urllib.parse import urlparse
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Union
 from collections import Counter
 import logging
 
@@ -22,7 +22,7 @@ import logging
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "JP Release v6.3 - FB Date Fix"
+BUILD_TAG = "JP Release v6.5 - Secure Auth (Env Vars)"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +44,7 @@ for k, v in {"df": None, "params": {}, "query_str": None, "logs": []}.items():
         st.session_state[k] = v
 
 def env(name: str) -> Optional[str]:
+    """Busca en st.secrets primero, luego en os.getenv (.env)"""
     try: return st.secrets.get(name) or os.getenv(name)
     except: return os.getenv(name)
 
@@ -55,22 +56,31 @@ def log_message(msg: str, level: str = "info"):
     else: logger.info(msg)
 
 # ============================================================================
-# LOGIN
+# LOGIN SEGURO (VARIABLES DE ENTORNO)
 # ============================================================================
 
-USERNAME = "Jota"
-PASSWORD = "Ñandu1314"
+# Ahora recuperamos las credenciales del entorno
+ADMIN_USER = env("ADMIN_USER") or "admin"     # Valor por defecto si falla .env
+ADMIN_PASS = env("ADMIN_PASS") or "admin123"
 
 def login():
-    st.title("Login de administrador")
-    user = st.text_input("Usuario")
-    pwd = st.text_input("Contraseña", type="password")
-    if st.button("Entrar"):
-        if user == USERNAME and pwd == PASSWORD:
-            st.session_state['logged_in'] = True
-            st.rerun()
-        else:
-            st.error("Usuario o contraseña incorrecta.")
+    st.title("🔐 Acceso Seguro")
+    st.markdown("Ingresa tus credenciales de administrador.")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        user = st.text_input("Usuario")
+        pwd = st.text_input("Contraseña", type="password")
+        
+        if st.button("Iniciar Sesión", use_container_width=True):
+            if user == ADMIN_USER and pwd == ADMIN_PASS:
+                st.session_state['logged_in'] = True
+                st.success("Acceso concedido.")
+                time.sleep(0.5)
+                st.rerun()
+            else:
+                st.error("Credenciales incorrectas.")
+                log_message("Intento de login fallido", "warning")
 
 if "logged_in" not in st.session_state or not st.session_state['logged_in']:
     login()
@@ -81,7 +91,6 @@ if "logged_in" not in st.session_state or not st.session_state['logged_in']:
 # ============================================================================
 
 async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_tokens: int = 10) -> str:
-    """Llamada individual asíncrona a DeepSeek"""
     deepseek_key = env("DEEPSEEK_API_KEY")
     if not deepseek_key: return "NEU"
     try:
@@ -117,7 +126,6 @@ async def process_emotions_batch_async(texts: List[str]) -> List[str]:
             tasks.append(async_fetch_deepseek(client, prompt, 15))
         return await asyncio.gather(*tasks)
 
-# Wrappers síncronos
 def analyze_sentiment_deepseek_optimized(texts: List[str]) -> List[str]:
     return asyncio.run(process_sentiment_batch_async(texts))
 
@@ -125,7 +133,7 @@ def analyze_emotions_deepseek_optimized(texts: List[str]) -> List[str]:
     return asyncio.run(process_emotions_batch_async(texts))
 
 # ============================================================================
-# APIFY CORE (CACHED & OPTIMIZED)
+# APIFY CORE (FAILOVER & ROTATION)
 # ============================================================================
 
 def get_apify_items_sync(dataset_id: str, token: str) -> List[Dict]:
@@ -137,31 +145,59 @@ def get_apify_items_sync(dataset_id: str, token: str) -> List[Dict]:
         log_message(f"Error dataset Apify: {e}", "error")
         return []
 
-def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
-    """Ejecuta actor con polling no bloqueante"""
-    url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
-    try:
-        r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
-        r.raise_for_status()
-        run_data = r.json()["data"]
-        run_id, dataset_id = run_data["id"], run_data["defaultDatasetId"]
-    except Exception as e:
-        log_message(f"Error inicio actor {actor_id}: {e}", "error")
+def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dict]:
+    """Ejecuta actor con rotación automática de tokens en caso de fallo"""
+    valid_tokens = [t for t in tokens if t and t.strip()]
+    if not valid_tokens:
+        log_message("No hay tokens de Apify válidos.", "error")
         return []
 
-    start_time = time.time()
-    while time.time() - start_time < 300: # 5 min timeout
-        time.sleep(ASYNC_POLL_INTERVAL)
+    last_error = None
+
+    for i, token in enumerate(valid_tokens):
+        attempt_label = f"Token #{i+1}"
+        url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
+        
         try:
-            r = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}", params={"token": token}, timeout=10)
-            if r.status_code == 200:
-                status = r.json()["data"]["status"]
-                if status == "SUCCEEDED":
-                    return get_apify_items_sync(dataset_id, token)
-                elif status in ["FAILED", "ABORTED", "TIMED-OUT"]:
-                    log_message(f"Actor falló: {status}", "error")
-                    return []
-        except: continue
+            # Intentar iniciar
+            r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
+            
+            # Si falla por créditos (402) o auth (401/403), lanzar error para rotar
+            if r.status_code in [401, 402, 403, 429]:
+                r.raise_for_status()
+            if r.status_code != 201:
+                r.raise_for_status()
+
+            # Run iniciado
+            run_data = r.json()["data"]
+            run_id, dataset_id = run_data["id"], run_data["defaultDatasetId"]
+            
+            # Polling
+            start_time = time.time()
+            while time.time() - start_time < 300:
+                time.sleep(ASYNC_POLL_INTERVAL)
+                try:
+                    r_poll = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}", params={"token": token}, timeout=10)
+                    if r_poll.status_code == 200:
+                        status = r_poll.json()["data"]["status"]
+                        if status == "SUCCEEDED":
+                            return get_apify_items_sync(dataset_id, token)
+                        elif status in ["FAILED", "ABORTED", "TIMED-OUT"]:
+                            raise RuntimeError(f"Run status: {status}")
+                except requests.exceptions.RequestException:
+                    continue
+            
+            raise RuntimeError("Timeout polling actor")
+
+        except Exception as e:
+            last_error = e
+            log_message(f"⚠️ Falló {attempt_label}: {str(e)}", "warning")
+            if i < len(valid_tokens) - 1:
+                log_message("🔄 Rotando al siguiente token...", "warning")
+                continue
+            else:
+                log_message("❌ Todos los tokens fallaron.", "error")
+
     return []
 
 # ============================================================================
@@ -169,18 +205,11 @@ def run_apify_actor(actor_id: str, token: str, payload: Dict) -> List[Dict]:
 # ============================================================================
 
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
-    """
-    Filtra DataFrame por ventana de fechas (Versión PERMISIVA).
-    Deja pasar fechas nulas (NaT) para evitar borrar posts de Facebook con fechas mal parseadas.
-    """
     if df is None or df.empty: return df
     if "created_at_cl" not in df.columns: return df
 
     mask = pd.Series(True, index=df.index)
     series_normalized = df["created_at_cl"].dt.normalize()
-    
-    # IMPORTANTE: Permitimos que pasen los NaT (Not a Time) con .isna()
-    # Esto salva los posts donde el scraper falló al leer la fecha.
     
     if d1:
         ts1 = pd.Timestamp(d1).tz_localize(SCL_TZ)
@@ -191,11 +220,8 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
         mask &= ((series_normalized <= ts2) | (series_normalized.isna()))
     
     filtered = df.loc[mask].copy()
-    
-    # Logging de depuración para ver cuántos posts se salvan
     null_dates = filtered["created_at_cl"].isna().sum()
     log_message(f"Filtrado fechas: {len(df)} -> {len(filtered)} posts (Inc. {null_dates} sin fecha)")
-    
     return filtered
 
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
@@ -220,13 +246,11 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
             if target not in df.columns:
                 df[target] = 0 if target in ["likes", "comments", "shares", "views"] else None
 
-    # Manejo de Fechas
     if "created_at" in df.columns:
         df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
         df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
         df["fecha_cl"] = df["created_at_cl"].dt.date
     
-    # Username
     if "username" not in df.columns:
         for c in ["ownerUsername", "authorUsername", "username", "author", "pageName"]:
             if c in df.columns:
@@ -243,7 +267,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
     df["platform"] = platform
     return df
 
-# Export Excel
+# Export Helpers
 def _drop_tz_for_excel(df: pd.DataFrame) -> pd.DataFrame:
     df2 = df.copy()
     for c in df2.columns:
@@ -262,7 +286,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 # ============================================================================
-# FETCHERS (CACHEADOS + FIX FACEBOOK REFORZADO)
+# FETCHERS (CACHEADOS + DUAL TOKEN)
 # ============================================================================
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -304,11 +328,7 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
     return normalize_common_optimized(all_rows, "x")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
-    """
-    FIX FACEBOOK HARDENED V2:
-    - Inyecta filtros de "Recientes" en la URL de búsqueda.
-    """
+def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
     payload = {"resultsLimit": limit, "maxPosts": limit}
     actor = "apify/facebook-posts-scraper"
     
@@ -320,13 +340,11 @@ def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.D
             else: urls.append({"url": f"https://www.facebook.com/{u}"})
         payload["startUrls"] = urls
     else:
-        # TRUCO CARMACK V2: URL con filtro RECENT_POSTS_V2 (Base64)
-        # Esto intenta forzar que FB devuelva cosas nuevas
         recent_filter = "eyJzb3J0X2tleSI6InRECENT_POSTS_V2In0%3D"
         payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}&filters={recent_filter}"}]
     
     try:
-        items = run_apify_actor(actor, token, payload)
+        items = run_apify_actor(actor, tokens, payload)
         normalized = []
         for i in items:
             normalized.append({
@@ -341,7 +359,7 @@ def fetch_facebook_cached(token: str, query: str, limit: int, mode: str) -> pd.D
     except Exception: return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_instagram_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
+def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
     actor = ""
     payload = {"resultsLimit": limit, "resultsType": "posts"}
     if mode == "hashtag":
@@ -355,22 +373,22 @@ def fetch_instagram_cached(token: str, query: str, limit: int, mode: str) -> pd.
         actor = "apify/instagram-post-scraper"
         payload["usernames"] = [u.strip() for u in query.split(",")]
         
-    items = run_apify_actor(actor, token, payload)
+    items = run_apify_actor(actor, tokens, payload)
     return normalize_common_optimized(items, "instagram")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_tiktok_cached(token: str, query: str, limit: int, mode: str) -> pd.DataFrame:
+def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
     payload = {"resultsPerPage": 100, "shouldDownloadVideos": False, "limit": limit}
     if mode == "user":
         payload["usernames"] = [u.strip() for u in query.split(",")]
     else:
         payload["hashtags"] = [h.strip().replace("#","") for h in query.split(",")]
     
-    items = run_apify_actor("clockworks/tiktok-scraper", token, payload)
+    items = run_apify_actor("clockworks/tiktok-scraper", tokens, payload)
     return normalize_common_optimized(items, "tiktok")
 
 # ============================================================================
-# FUNCIONES VISUALES (MATPLOTLIB)
+# FUNCIONES VISUALES
 # ============================================================================
 
 def plot_pie_chart(series, title):
@@ -401,7 +419,7 @@ def plot_bar_chart(series, title, color_hex="#3498db"):
     return fig
 
 # ============================================================================
-# HELPERS ORIGINALES (WORDCLOUD, TOPICS, CRISIS)
+# HELPERS ORIGINALES
 # ============================================================================
 
 EXTRA_STOP = {"rt","https","http","t","co","amp","si","no","asi","aqui","ahi","ser","estar","haber","hacer","de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"}
@@ -454,13 +472,11 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
     if df.empty: return {"score": 0, "severity": "none", "signals": [], "crisis_posts": pd.DataFrame()}
     signals = []
     crisis_score = 0
-    
     if "sentiment" in df.columns:
         neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
         if neg_ratio > 0.3:
             signals.append(f"Sentimiento negativo alto: {neg_ratio*100:.1f}%")
             crisis_score += 25
-    
     keywords = CRISIS_KEYWORDS.get(lang, CRISIS_KEYWORDS["es"])
     if "text" in df.columns:
         crisis_posts = df[df["text"].str.lower().str.contains("|".join(keywords), regex=True, na=False)]
@@ -469,7 +485,6 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
             crisis_score += min(30, len(crisis_posts) * 5)
     else:
         crisis_posts = pd.DataFrame()
-        
     severity = "critical" if crisis_score >= 60 else "high" if crisis_score >= 40 else "medium" if crisis_score >= 20 else "low"
     return {"score": min(100, crisis_score), "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
@@ -556,8 +571,11 @@ emotions = st.sidebar.checkbox("😊 Analizar emociones (Ekman 6)", value=False)
 st.sidebar.divider()
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
+# TOKENS APIFY DUALES
+st.sidebar.subheader("🔐 Credenciales")
 api_x = st.sidebar.text_input("API Key twitterapi.io (X)", value=env("TWITTERAPI_IO_KEY"), type="password")
-api_apify = st.sidebar.text_input("APIFY_TOKEN", value=env("APIFY_TOKEN"), type="password")
+api_apify_1 = st.sidebar.text_input("Token Apify (Primario)", value=env("APIFY_TOKEN"), type="password")
+api_apify_2 = st.sidebar.text_input("Token Apify (Respaldo)", value=env("APIFY_TOKEN_2") or "", type="password", help="Opcional")
 
 # ============================================================================
 # EJECUCIÓN
@@ -567,6 +585,9 @@ if run_btn:
     st.session_state["logs"] = []
     prog = st.progress(0.0, text="Iniciando búsqueda...")
     df = pd.DataFrame()
+    
+    # Lista de tokens disponibles
+    apify_tokens = [t for t in [api_apify_1, api_apify_2] if t and t.strip()]
     
     try:
         # 1. FETCHING
@@ -579,22 +600,22 @@ if run_btn:
             df = fetch_x_cached(api_x, qx, limit)
             
         elif platform == "Facebook":
-            if not api_apify: st.error("Falta Token Apify"); st.stop()
+            if not apify_tokens: st.error("Falta Token Apify"); st.stop()
             fb_mode = "user" if "usuario" in search_mode else "search"
             q_fb = username_input if fb_mode == "user" else topic
-            df = fetch_facebook_cached(api_apify, q_fb, limit, fb_mode)
+            df = fetch_facebook_cached(apify_tokens, q_fb, limit, fb_mode)
             
         elif platform == "Instagram":
-            if not api_apify: st.error("Falta Token Apify"); st.stop()
+            if not apify_tokens: st.error("Falta Token Apify"); st.stop()
             ig_mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
             q_ig = hashtags_str if ig_mode == "hashtag" else (username_input if ig_mode == "user" else topic)
-            df = fetch_instagram_cached(api_apify, q_ig, limit, ig_mode)
+            df = fetch_instagram_cached(apify_tokens, q_ig, limit, ig_mode)
             
         elif platform == "TikTok":
-            if not api_apify: st.error("Falta Token Apify"); st.stop()
+            if not apify_tokens: st.error("Falta Token Apify"); st.stop()
             tt_mode = "user" if "usuario" in search_mode else "hashtag"
             q_tt = username_input if tt_mode == "user" else topic
-            df = fetch_tiktok_cached(api_apify, q_tt, limit, tt_mode)
+            df = fetch_tiktok_cached(apify_tokens, q_tt, limit, tt_mode)
 
         # 2. FILTRADO FECHAS (PERMISIVO)
         df = enforce_date_window(df, d1, d2)
