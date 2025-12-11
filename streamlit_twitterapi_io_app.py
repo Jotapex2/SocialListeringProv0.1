@@ -733,6 +733,7 @@ if df is not None and not df.empty:
     m3.metric("Likes", int(df["likes"].sum()))
     m4.metric("Comentarios", int(df["comments"].sum()))
     m5.metric("Shares", int(df["shares"].sum()))
+    m6.metric("Vistas", int(df["views"].sum()) if "views" in df.columns else 0)
 
     # Visualizaciones
     st.header("📊 Visualizaciones")
