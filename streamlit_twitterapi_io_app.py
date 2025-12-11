@@ -725,14 +725,17 @@ if df is not None and not df.empty:
                 st.dataframe(crisis_data["crisis_posts"])
         st.divider()
 
-    # Métricas
+  # Métricas
     st.header("📈 Resumen de métricas")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    # Cambiamos de 5 a 6 columnas
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    
     m1.metric("Posts", len(df))
     m2.metric("Usuarios", df["username"].nunique() if "username" in df else 0)
     m3.metric("Likes", int(df["likes"].sum()))
     m4.metric("Comentarios", int(df["comments"].sum()))
     m5.metric("Shares", int(df["shares"].sum()))
+    # Agregamos la métrica de Vistas
     m6.metric("Vistas", int(df["views"].sum()) if "views" in df.columns else 0)
 
     # Visualizaciones
