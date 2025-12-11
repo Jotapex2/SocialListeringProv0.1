@@ -80,43 +80,42 @@ if "logged_in" not in st.session_state or not st.session_state['logged_in']:
     st.stop()
 
 # ============================================================================
-# MOTOR ASÍNCRONO (ASYNC CORE) - OPTIMIZADO V2 (CON SEMÁFORO Y LIMPIEZA)
+# MOTOR ASÍNCRONO (ASYNC CORE) - FINAL STABLE
 # ============================================================================
 
-# Limita la concurrencia para evitar el Error 429 (Too Many Requests) de DeepSeek
-MAX_CONCURRENT_REQUESTS = 10 
-SEM = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-
-async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_tokens: int = 10) -> str:
+async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, sem: asyncio.Semaphore, max_tokens: int = 10) -> str:
+    """
+    Realiza la petición a DeepSeek respetando el semáforo para evitar Rate Limits (429).
+    """
     deepseek_key = env("DEEPSEEK_API_KEY")
     if not deepseek_key: 
         return "NEU"
     
-    # Usamos el semáforo para esperar turno si hay muchas peticiones activas
-    async with SEM:
+    # El semáforo controla que no haya más de X peticiones vivas simultáneamente
+    async with sem:
         try:
             response = await client.post(
                 "/v1/chat/completions",
                 json={
                     "model": "deepseek-chat",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1, # Un pelín de temp ayuda a evitar loops, pero bajo para consistencia
+                    "temperature": 0.1, # Baja temperatura para determinismo
                     "max_tokens": max_tokens
                 },
                 headers={
                     "Authorization": f"Bearer {deepseek_key}",
                     "Content-Type": "application/json"
                 }, 
-                timeout=45.0 # Aumentamos timeout por si hay cola
+                timeout=45.0 # Timeout generoso para colas
             )
             
             if response.status_code == 200:
                 content = response.json()['choices'][0]['message']['content'].strip().upper()
-                # Limpieza agresiva: eliminar puntos, comillas y espacios extra
+                # Limpieza estricta: Solo letras y números, elimina puntos finales (ej: "NEG." -> "NEG")
                 clean_content = re.sub(r'[^\w]', '', content) 
                 return clean_content
             elif response.status_code == 429:
-                logger.warning("DeepSeek Rate Limit 429 - Retornando NEU")
+                logger.warning("DeepSeek Rate Limit (429) - Retornando NEU")
                 return "NEU"
             else:
                 logger.error(f"DeepSeek Error {response.status_code}: {response.text}")
@@ -126,26 +125,33 @@ async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_token
             return "NEU"
 
 async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
-    # Aumentamos los límites de conexión del cliente
+    # Configuración de límites de conexión del cliente HTTP
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    
+    # IMPORTANTE: El semáforo se crea DENTRO del loop activo actual
+    sem = asyncio.Semaphore(10) 
+    
     async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
-            # Prompt blindado para evitar palabrería
+            # Recorte a 300 caracteres para optimizar tokens y latencia
+            safe_text = text[:300] if text else ""
             prompt = (
-                f"Clasifica el sentimiento: '{text[:300]}'. "
+                f"Clasifica el sentimiento: '{safe_text}'. "
                 "Responde EXCLUSIVAMENTE con una palabra: POS, NEG o NEU."
             )
-            tasks.append(async_fetch_deepseek(client, prompt, 5))
+            # Pasamos el semáforo local a la función worker
+            tasks.append(async_fetch_deepseek(client, prompt, sem, 5))
         
-        # Barra de progreso "invisible" (esperamos todos los resultados)
+        # Ejecución concurrente
         results = await asyncio.gather(*tasks)
         
-        # Post-procesamiento para asegurar que si falla algo raro, sea NEU
+        # Validación final de integridad
         final_results = []
         for r in results:
             if r in ["POS", "NEG", "NEU"]:
                 final_results.append(r)
+            # Fallbacks por si el modelo responde "ES POSITIVO"
             elif "POS" in r: final_results.append("POS")
             elif "NEG" in r: final_results.append("NEG")
             else: final_results.append("NEU")
@@ -155,40 +161,53 @@ async def process_emotions_batch_async(texts: List[str]) -> List[str]:
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     valid_emotions = ["RISA", "IRA", "MIEDO", "TRISTEZA", "DISGUSTO", "SORPRESA", "NEUTRAL"]
     
+    # Semáforo local para este loop
+    sem = asyncio.Semaphore(10)
+
     async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
+            safe_text = text[:300] if text else ""
             prompt = (
-                f"Detecta la emoción en: '{text[:300]}'. "
+                f"Detecta la emoción en: '{safe_text}'. "
                 "Opciones: RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA, NEUTRAL. "
-                "Responde SOLO con la palabra."
+                "Responde SOLO con la palabra clave."
             )
-            tasks.append(async_fetch_deepseek(client, prompt, 10))
+            tasks.append(async_fetch_deepseek(client, prompt, sem, 10))
         
         results = await asyncio.gather(*tasks)
         
-        # Mapeo de limpieza por si el modelo responde "TRISTEZA." o "LA EMOCION ES IRA"
+        # Lógica de mapeo robusta
         clean_results = []
         for r in results:
             found = False
+            # Prioridad a coincidencia exacta o contenida
             for emo in valid_emotions:
                 if emo in r:
                     clean_results.append(emo)
                     found = True
                     break
             if not found:
-                clean_results.append("NEUTRAL") # Fallback seguro
+                clean_results.append("NEUTRAL")
         
         return clean_results
 
 def analyze_sentiment_deepseek_optimized(texts: List[str]) -> List[str]:
     if not texts: return []
-    return asyncio.run(process_sentiment_batch_async(texts))
+    try:
+        # asyncio.run crea un nuevo loop y ejecuta la corrutina entry point
+        return asyncio.run(process_sentiment_batch_async(texts))
+    except Exception as e:
+        logger.error(f"Error crítico en Sentiment Async: {e}")
+        return ["NEU"] * len(texts)
 
 def analyze_emotions_deepseek_optimized(texts: List[str]) -> List[str]:
     if not texts: return []
-    return asyncio.run(process_emotions_batch_async(texts))
-
+    try:
+        return asyncio.run(process_emotions_batch_async(texts))
+    except Exception as e:
+        logger.error(f"Error crítico en Emotions Async: {e}")
+        return ["NEUTRAL"] * len(texts)
 # ============================================================================
 # APIFY CORE (FAILOVER)
 # ============================================================================
