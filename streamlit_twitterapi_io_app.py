@@ -80,49 +80,113 @@ if "logged_in" not in st.session_state or not st.session_state['logged_in']:
     st.stop()
 
 # ============================================================================
-# MOTOR ASÍNCRONO (ASYNC CORE)
+# MOTOR ASÍNCRONO (ASYNC CORE) - OPTIMIZADO V2 (CON SEMÁFORO Y LIMPIEZA)
 # ============================================================================
+
+# Limita la concurrencia para evitar el Error 429 (Too Many Requests) de DeepSeek
+MAX_CONCURRENT_REQUESTS = 10 
+SEM = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
 async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, max_tokens: int = 10) -> str:
     deepseek_key = env("DEEPSEEK_API_KEY")
-    if not deepseek_key: return "NEU"
-    try:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "deepseek-chat",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0, "max_tokens": max_tokens
-            },
-            headers={"Authorization": f"Bearer {deepseek_key}"}, timeout=30.0
-        )
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content'].strip().upper()
+    if not deepseek_key: 
         return "NEU"
-    except Exception as e:
-        logger.error(f"DeepSeek Async Error: {e}")
-        return "NEU"
+    
+    # Usamos el semáforo para esperar turno si hay muchas peticiones activas
+    async with SEM:
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1, # Un pelín de temp ayuda a evitar loops, pero bajo para consistencia
+                    "max_tokens": max_tokens
+                },
+                headers={
+                    "Authorization": f"Bearer {deepseek_key}",
+                    "Content-Type": "application/json"
+                }, 
+                timeout=45.0 # Aumentamos timeout por si hay cola
+            )
+            
+            if response.status_code == 200:
+                content = response.json()['choices'][0]['message']['content'].strip().upper()
+                # Limpieza agresiva: eliminar puntos, comillas y espacios extra
+                clean_content = re.sub(r'[^\w]', '', content) 
+                return clean_content
+            elif response.status_code == 429:
+                logger.warning("DeepSeek Rate Limit 429 - Retornando NEU")
+                return "NEU"
+            else:
+                logger.error(f"DeepSeek Error {response.status_code}: {response.text}")
+                return "NEU"
+        except Exception as e:
+            logger.error(f"DeepSeek Async Exception: {e}")
+            return "NEU"
 
 async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
-    async with httpx.AsyncClient(base_url="https://api.deepseek.com") as client:
+    # Aumentamos los límites de conexión del cliente
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
-            prompt = f"Analiza el sentimiento del siguiente texto y responde SOLO con UNA de estas tres opciones: POS, NEG o NEU\n\nTexto: {text}\n\nRespuesta:"
-            tasks.append(async_fetch_deepseek(client, prompt, 10))
-        return await asyncio.gather(*tasks)
+            # Prompt blindado para evitar palabrería
+            prompt = (
+                f"Clasifica el sentimiento: '{text[:300]}'. "
+                "Responde EXCLUSIVAMENTE con una palabra: POS, NEG o NEU."
+            )
+            tasks.append(async_fetch_deepseek(client, prompt, 5))
+        
+        # Barra de progreso "invisible" (esperamos todos los resultados)
+        results = await asyncio.gather(*tasks)
+        
+        # Post-procesamiento para asegurar que si falla algo raro, sea NEU
+        final_results = []
+        for r in results:
+            if r in ["POS", "NEG", "NEU"]:
+                final_results.append(r)
+            elif "POS" in r: final_results.append("POS")
+            elif "NEG" in r: final_results.append("NEG")
+            else: final_results.append("NEU")
+        return final_results
 
 async def process_emotions_batch_async(texts: List[str]) -> List[str]:
-    async with httpx.AsyncClient(base_url="https://api.deepseek.com") as client:
+    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    valid_emotions = ["RISA", "IRA", "MIEDO", "TRISTEZA", "DISGUSTO", "SORPRESA", "NEUTRAL"]
+    
+    async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
-            prompt = f"Analiza la emoción predominante y responde SOLO con UNA de estas opciones: RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA, NEUTRAL\n\nTexto: {text}\n\nRespuesta:"
-            tasks.append(async_fetch_deepseek(client, prompt, 15))
-        return await asyncio.gather(*tasks)
+            prompt = (
+                f"Detecta la emoción en: '{text[:300]}'. "
+                "Opciones: RISA, IRA, MIEDO, TRISTEZA, DISGUSTO, SORPRESA, NEUTRAL. "
+                "Responde SOLO con la palabra."
+            )
+            tasks.append(async_fetch_deepseek(client, prompt, 10))
+        
+        results = await asyncio.gather(*tasks)
+        
+        # Mapeo de limpieza por si el modelo responde "TRISTEZA." o "LA EMOCION ES IRA"
+        clean_results = []
+        for r in results:
+            found = False
+            for emo in valid_emotions:
+                if emo in r:
+                    clean_results.append(emo)
+                    found = True
+                    break
+            if not found:
+                clean_results.append("NEUTRAL") # Fallback seguro
+        
+        return clean_results
 
 def analyze_sentiment_deepseek_optimized(texts: List[str]) -> List[str]:
+    if not texts: return []
     return asyncio.run(process_sentiment_batch_async(texts))
 
 def analyze_emotions_deepseek_optimized(texts: List[str]) -> List[str]:
+    if not texts: return []
     return asyncio.run(process_emotions_batch_async(texts))
 
 # ============================================================================
