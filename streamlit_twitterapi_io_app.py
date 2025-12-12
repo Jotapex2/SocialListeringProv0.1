@@ -285,12 +285,15 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty: return df
 
+    # Mapeo extendido para incluir seguidores
     col_map = {
         "text": ["caption", "description", "title", "text", "message", "postText"],
         "likes": ["likeCount", "likesCount", "diggCount", "likes", "reactionCount"],
         "comments": ["commentCount", "commentsCount", "comments"],
         "shares": ["shareCount", "retweetCount", "shares"],
         "views": ["playCount", "viewCount", "videoPlayCount", "views"],
+        # Nueva métrica: Seguidores
+        "followers": ["followers", "followersCount", "fans", "followerCount", "userFollowers"],
         "created_at": ["timestamp", "takenAt", "createTimeISO", "createdAt", "date", "time"]
     }
 
@@ -298,7 +301,9 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
         if target not in df.columns:
             for c in candidates:
                 if c in df.columns: df[target] = df[c]; break
-            if target not in df.columns: df[target] = 0 if target in ["likes", "comments", "shares", "views"] else None
+            # Default: 0 para métricas, None para otros
+            if target not in df.columns: 
+                df[target] = 0 if target in ["likes", "comments", "shares", "views", "followers"] else None
 
     if "created_at" in df.columns:
         df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
@@ -312,8 +317,9 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
                 break
     
     if "text" in df.columns: df["text"] = df["text"].fillna("").astype(str)
-        
-    for col in ["likes", "comments", "shares", "views"]:
+    
+    # Conversión segura a números para todas las métricas
+    for col in ["likes", "comments", "shares", "views", "followers"]:
         if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     df["platform"] = platform
@@ -362,6 +368,8 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
                     "username": u.get("userName"), "text": t.get("text"),
                     "likes": t.get("likeCount", 0), "comments": t.get("replyCount", 0),
                     "shares": t.get("retweetCount", 0), "views": t.get("viewCount", 0),
+                    # Capturamos seguidores de la API
+                    "followers": u.get("followers") or u.get("followersCount") or 0,
                     "url": t.get("url"),
                 })
             if len(all_rows) >= limit: break
@@ -514,21 +522,52 @@ def detect_crisis_signals(df: pd.DataFrame, lang: str = "es") -> Dict[str, Any]:
     if df.empty: return {"score": 0, "severity": "none", "signals": [], "crisis_posts": pd.DataFrame()}
     signals = []
     crisis_score = 0
+    
+    # 1. Score por Sentimiento Negativo
     if "sentiment" in df.columns:
         neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
         if neg_ratio > 0.3:
             signals.append(f"Sentimiento negativo alto: {neg_ratio*100:.1f}%")
             crisis_score += 25
+            
+    # 2. Score por Palabras Clave
     keywords = CRISIS_KEYWORDS.get(lang, CRISIS_KEYWORDS["es"])
     if "text" in df.columns:
-        crisis_posts = df[df["text"].str.lower().str.contains("|".join(keywords), regex=True, na=False)]
+        # Copia para evitar Warnings de pandas
+        crisis_posts = df[df["text"].str.lower().str.contains("|".join(keywords), regex=True, na=False)].copy()
+        
         if len(crisis_posts) > 0:
-            signals.append(f"Posts con palabras de crisis: {len(crisis_posts)}")
-            crisis_score += min(30, len(crisis_posts) * 5)
+            count = len(crisis_posts)
+            signals.append(f"Posts con palabras de crisis: {count}")
+            # Base: +5 puntos por post (max 30)
+            crisis_score += min(30, count * 5)
+            
+            # 3. NUEVO: Ponderación por Influencia (Seguidores)
+            if "followers" in df.columns:
+                # Detectar cuentas influyentes (> 10,000 seguidores)
+                influencers = crisis_posts[crisis_posts["followers"] > 10000]
+                total_reach = crisis_posts["followers"].sum()
+                
+                if not influencers.empty:
+                    inf_count = len(influencers)
+                    # +10 puntos por cada influencer involucrado (max 30 extra)
+                    added_score = min(30, inf_count * 10)
+                    crisis_score += added_score
+                    signals.append(f"⚠️ {inf_count} cuenta(s) influyente(s) detectada(s)")
+                
+                # Bonus por alcance masivo (> 100k alcance total)
+                if total_reach > 100000:
+                    crisis_score += 15
+                    signals.append(f"Alcance potencial crítico: {total_reach:,.0f} usuarios")
+
     else:
         crisis_posts = pd.DataFrame()
-    severity = "critical" if crisis_score >= 60 else "high" if crisis_score >= 40 else "medium" if crisis_score >= 20 else "low"
-    return {"score": min(100, crisis_score), "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
+        
+    # Calcular severidad final
+    crisis_score = min(100, crisis_score)
+    severity = "critical" if crisis_score >= 80 else "high" if crisis_score >= 60 else "medium" if crisis_score >= 30 else "low"
+    
+    return {"score": crisis_score, "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
 # ============================================================================
 # QUERY BUILDERS X
