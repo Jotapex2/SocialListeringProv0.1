@@ -270,10 +270,12 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
     series_normalized = df["created_at_cl"].dt.normalize()
     
     if d1:
-        ts1 = pd.Timestamp(d1).tz_localize(SCL_TZ)
+        # FIX: nonexistent="shift_forward" evita crash por cambio de hora (DST Chile)
+        ts1 = pd.Timestamp(d1).tz_localize(SCL_TZ, nonexistent="shift_forward")
         mask &= ((series_normalized >= ts1) | (series_normalized.isna()))
     if d2:
-        ts2 = pd.Timestamp(d2).tz_localize(SCL_TZ)
+        # FIX: nonexistent="shift_forward" evita crash por cambio de hora (DST Chile)
+        ts2 = pd.Timestamp(d2).tz_localize(SCL_TZ, nonexistent="shift_forward")
         mask &= ((series_normalized <= ts2) | (series_normalized.isna()))
     
     filtered = df.loc[mask].copy()
