@@ -182,12 +182,13 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
 
     prompt = (
         f"Actúa como un analista de inteligencia digital. "
-        f"Escribe un 'Resumen Ejecutivo' breve (máx 120 palabras) en español basado en los datos proporcionados.\n\n"
+        f"Escribe un 'Resumen Ejecutivo' breve (máx 500 palabras) en español basado en los datos proporcionados.\n\n"
         f"DATOS:\n{context}\n\n"
         f"INSTRUCCIONES CLAVE:\n"
-        f"1. Resume la tendencia general de sentimiento.\n"
+        f"1. Resume la tendencia general de sentimiento y emociones.\n"
         f"2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados en los datos para explicar qué está impulsando la conversación. Menciona el usuario y qué dijo brevemente.\n"
-        f"3. Mantén un tono profesional."
+        f"3. Entrega un resumen de métricas: posteos, interacciones y visualizaciones en el caso de que estén"
+        f"4. Mantén un tono profesional."
     )
 
     try:
@@ -821,6 +822,7 @@ if df is not None and not df.empty:
                         f"METRICAS GENERALES:\n"
                         f"- Total Posts: {len(df)}\n"
                         f"- Interacciones Totales: {int(df['likes'].sum() + df['comments'].sum())}\n\n"
+                        f"- Visualizaciones: {int(df['views'])}\n"
                         f"Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
                     )
 
