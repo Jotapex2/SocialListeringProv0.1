@@ -706,6 +706,7 @@ if df is not None and not df.empty:
         st.info(f"🤖 **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
 
     # Crisis Alert
+ # Crisis Alert
     crisis_data = detect_crisis_signals(df)
     if crisis_data["score"] > 0:
         c_color = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(crisis_data["severity"],"⚪")
@@ -714,6 +715,30 @@ if df is not None and not df.empty:
         col1.metric("Score Crisis", f"{crisis_data['score']}/100")
         with col2:
             for s in crisis_data["signals"]: st.write(f"• {s}")
+        
+        # --- AQUÍ ESTÁ EL ARREGLO ---
+        # Verificamos si hay posts de crisis y los mostramos
+        if not crisis_data["crisis_posts"].empty:
+            st.warning("⚠️ Se han detectado los siguientes posts conflictivos:")
+            
+            # 1. Mostrar tabla visual en la App
+            # Seleccionamos solo columnas relevantes para que se vea ordenado
+            cols_to_show = ["created_at", "username", "text", "likes", "url"]
+            # Filtramos para que no falle si alguna columna no existe (ej: url)
+            cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
+            
+            st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
+            
+            # 2. Botón para DESCARGAR (EXPORTAR) solo los posts de crisis
+            st.download_button(
+                label="📥 Descargar Posts de Crisis (Excel)",
+                data=df_to_excel_bytes(crisis_data["crisis_posts"]),
+                file_name="reporte_crisis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_download_crisis"
+            )
+        # ----------------------------
+        
         st.divider()
 
     # KPIs
@@ -810,22 +835,27 @@ if df is not None and not df.empty:
             else:
                 with st.spinner("Enviando..."):
                     # Construcción del cuerpo del correo CON el resumen y citas
+                    # Construcción del cuerpo del correo CON el resumen y citas
                     query_val = topic or username_input or hashtags_str
+                    
+                    # CORRECCIÓN AQUÍ: Usamos SCL_TZ para la fecha exacta
+                    fecha_reporte = datetime.now(SCL_TZ).strftime('%d/%m/%Y %H:%M')
+                    
                     email_body = (
                         f"REPORTE SOCIAL LISTENING PRO\n"
                         f"============================\n"
-                        f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}\n"
+                        f"Fecha de generación: {fecha_reporte}\n"
                         f"Plataforma: {platform}\n"
                         f"Búsqueda: {query_val}\n\n"
                         f"RESUMEN EJECUTIVO (IA):\n"
                         f"{ai_summary if ai_summary else 'No disponible.'}\n\n"
                         f"METRICAS GENERALES:\n"
                         f"- Total Posts: {len(df)}\n"
-                        f"- Interacciones Totales: {int(df['likes'].sum() + df['comments'].sum())}\n\n"
-                        f"- Visualizaciones: {int(df['views'])}\n"
+                        f"- Interacciones Totales: {int(df['likes'].sum() + df['comments'].sum())}\n"
+                        # CORRECCIÓN AQUÍ: Agregamos .sum() a las vistas
+                        f"- Visualizaciones: {int(df['views'].sum())}\n\n"
                         f"Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
                     )
-
                     success, msg = send_email_report(
                         email_to, 
                         f"Reporte: {platform} - {query_val}", 
