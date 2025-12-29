@@ -748,80 +748,58 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
     """
     Filtra DataFrame por ventana de fechas.
-    Versión simplificada que evita problemas de DST.
+    Usa fecha_cl (date objects) directamente, SIN timezone.
     """
     if df is None or df.empty:
         return df
     
-    if "created_at_cl" not in df.columns:
-        log_message("Columna 'created_at_cl' no encontrada, saltando filtrado de fechas", "warning")
+    if "fecha_cl" not in df.columns:
+        log_message("Columna 'fecha_cl' no encontrada, saltando filtrado", "warning")
         return df
     
-    # Validar fechas contra fecha actual
+    # Validar fechas
     current = datetime.now(SCL_TZ).date()
     if d1 and d1 > current:
-        log_message(f"Fecha 'desde' futura ({d1}), ajustando a hoy", "warning")
+        log_message(f"Ajustando fecha 'desde' futura: {d1} → {current}", "warning")
         d1 = current
     if d2 and d2 > current:
-        log_message(f"Fecha 'hasta' futura ({d2}), ajustando a hoy", "warning")
+        log_message(f"Ajustando fecha 'hasta' futura: {d2} → {current}", "warning")
         d2 = current
     
     try:
-        # Extraer solo la FECHA (sin hora) como objetos date de Python
-        # Esto evita completamente problemas de timezone
-        df_copy = df.copy()
-        df_copy["_temp_date"] = df_copy["created_at_cl"].dt.date
+        # Filtrar usando date objects directamente (sin timezone issues)
+        mask = pd.Series(True, index=df.index)
         
-        # Crear máscara de filtrado
-        mask = pd.Series(True, index=df_copy.index)
-        
-        # Filtrar por fecha inicial
         if d1:
-            mask &= ((df_copy["_temp_date"] >= d1) | (df_copy["_temp_date"].isna()))
+            mask &= ((df["fecha_cl"] >= d1) | (df["fecha_cl"].isna()))
         
-        # Filtrar por fecha final
         if d2:
-            mask &= ((df_copy["_temp_date"] <= d2) | (df_copy["_temp_date"].isna()))
+            mask &= ((df["fecha_cl"] <= d2) | (df["fecha_cl"].isna()))
         
-        # Aplicar filtro
         filtered = df.loc[mask].copy()
         
-        # Logging
         removed = len(df) - len(filtered)
-        log_message(
-            f"Filtrado de fechas: {len(df)} → {len(filtered)} posts ({removed} removidos)",
-            "info"
-        )
+        log_message(f"Filtrado: {len(df)} → {len(filtered)} ({removed} removidos)", "info")
         
         if st.session_state.get("debug_mode"):
             log_message(
-                "Detalles de filtrado",
+                "Detalles filtrado",
                 "debug",
                 {
-                    "original_count": len(df),
-                    "filtered_count": len(filtered),
+                    "original": len(df),
+                    "filtered": len(filtered),
                     "removed": removed,
-                    "date_from": str(d1),
-                    "date_to": str(d2),
-                    "null_dates": df_copy["_temp_date"].isna().sum()
+                    "d1": str(d1),
+                    "d2": str(d2),
+                    "null_dates": df["fecha_cl"].isna().sum()
                 }
             )
         
         return filtered
         
     except Exception as e:
-        log_message(
-            f"Error en enforce_date_window: {e}",
-            "error",
-            {
-                "exception": str(e),
-                "traceback": traceback.format_exc(),
-                "d1": str(d1),
-                "d2": str(d2)
-            }
-        )
-        # En caso de error, devolver DataFrame original sin filtrar
-        st.warning(f"⚠️ No se pudo aplicar filtro de fechas: {e}")
+        log_message(f"Error en filtrado: {e}", "error", {"traceback": traceback.format_exc()})
+        st.warning(f"⚠️ Error al filtrar fechas: {e}")
         return df
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
