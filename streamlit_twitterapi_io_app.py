@@ -567,7 +567,7 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
 
 @measure_time("normalize_common")
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
-    """Normaliza datos de diferentes plataformas con manejo robusto de timezone."""
+    """Normaliza datos de diferentes plataformas SIN conversión de timezone."""
     log_message(f"Normalizando {len(rows)} filas de {platform}", "debug")
     df = pd.DataFrame(rows)
     if df.empty: return df
@@ -591,32 +591,27 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
             if target not in df.columns: 
                 df[target] = 0 if target in ["likes", "comments", "shares", "views", "followers"] else None
 
-    # CONVERSIÓN DE FECHAS MEJORADA
+    # CONVERSIÓN DE FECHAS SIMPLIFICADA (SIN TIMEZONE)
     if "created_at" in df.columns:
         try:
-            # Convertir a UTC primero
+            # Convertir a datetime UTC
             df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
             
-            # Convertir a Chile con manejo de DST
-            df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
+            # Extraer SOLO la fecha como string o date object (sin timezone)
+            df["fecha_cl"] = df["created_at_utc"].dt.date
             
-            # Extraer fecha simple (evita problemas de DST)
-            df["fecha_cl"] = df["created_at_cl"].dt.date
+            # Crear versión naive (sin timezone) para visualización
+            df["created_at_display"] = df["created_at_utc"].dt.tz_localize(None)
             
-            # Contar conversiones fallidas
-            failed_conversions = df["created_at_cl"].isna().sum()
-            if failed_conversions > 0:
-                log_message(
-                    f"⚠️ {failed_conversions} fechas no pudieron convertirse", 
-                    "warning",
-                    {"platform": platform, "failed": failed_conversions}
-                )
+            failed = df["created_at_utc"].isna().sum()
+            if failed > 0:
+                log_message(f"⚠️ {failed} fechas no convertidas", "warning")
+                
         except Exception as e:
             log_message(f"Error en conversión de fechas: {e}", "error")
-            # Crear columnas vacías si falla
             df["created_at_utc"] = pd.NaT
-            df["created_at_cl"] = pd.NaT
             df["fecha_cl"] = None
+            df["created_at_display"] = pd.NaT
     
     # Usuario
     if "username" not in df.columns:
@@ -636,12 +631,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
 
     df["platform"] = platform
     
-    log_message(f"Normalización completa: {df.shape}", "debug", {
-        "rows": len(df),
-        "columns": len(df.columns),
-        "null_dates": df["created_at_cl"].isna().sum() if "created_at_cl" in df.columns else 0
-    })
-    
+    log_message(f"Normalización completa: {df.shape}", "debug")
     return df
 
 
