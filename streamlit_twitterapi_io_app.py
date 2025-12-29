@@ -930,7 +930,7 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
 
 
 # ============================================================================
-# INTERFAZ STREAMLIT
+# INTERFAZ STREAMLIT (CORREGIDA - CREDENCIALES EN EL LUGAR CORRECTO)
 # ============================================================================
 
 st.title("📡 Social Listening Pro — X + Instagram + Facebook + TikTok")
@@ -939,33 +939,14 @@ st.markdown("**Análisis avanzado con detección de crisis, sentimiento y report
 st.sidebar.header("⚙️ Configuración")
 
 # ============================================================================
-# CREDENCIALES (PRIMERO, ANTES DEL DEBUG)
+# DEBUG MODE TOGGLE (PRIMERO)
 # ============================================================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔑 Credenciales API")
-
-env_x = env("TWITTERAPI_IO_KEY")
-api_x = env_x if env_x else st.sidebar.text_input("API Key twitterapi.io", type="password", key="input_api_x")
-
-env_apify = env("APIFY_TOKEN")
-api_apify = env_apify if env_apify else st.sidebar.text_input("Token Apify", type="password", key="input_api_apify")
-
-# Mostrar estado de credenciales
-if api_x:
-    st.sidebar.success("✅ X API configurada")
-else:
-    st.sidebar.warning("⚠️ X API faltante")
-
-if api_apify:
-    st.sidebar.success("✅ Apify configurada")
-else:
-    st.sidebar.warning("⚠️ Apify faltante")
-
-# ============================================================================
-# DEBUG MODE TOGGLE
-# ============================================================================
-st.sidebar.markdown("---")
-debug_mode = st.sidebar.checkbox("🐛 **Modo Debug**", value=st.session_state.get("debug_mode", False), key="toggle_debug")
+debug_mode = st.sidebar.checkbox(
+    "🐛 **Modo Debug**", 
+    value=st.session_state.get("debug_mode", False),
+    key="toggle_debug_mode"
+)
 st.session_state["debug_mode"] = debug_mode
 
 if debug_mode:
@@ -974,7 +955,7 @@ if debug_mode:
 st.sidebar.markdown("---")
 
 # ============================================================================
-# CONFIGURACIÓN DE BÚSQUEDA
+# CONFIGURACIÓN DE PLATAFORMA Y BÚSQUEDA
 # ============================================================================
 
 platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
@@ -1006,7 +987,10 @@ filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo Chile (X)")
 
 st.sidebar.divider()
 
-# Fechas con validación
+# ============================================================================
+# FECHAS CON VALIDACIÓN
+# ============================================================================
+
 current_date_cl = datetime.now(SCL_TZ).date()
 default_start = current_date_cl - timedelta(days=14)
 
@@ -1014,7 +998,7 @@ d1 = st.sidebar.date_input(
     "Desde", 
     value=default_start,
     max_value=current_date_cl,
-    key="date_from"
+    key="date_input_from"
 )
 
 d2 = st.sidebar.date_input(
@@ -1022,7 +1006,7 @@ d2 = st.sidebar.date_input(
     value=current_date_cl,
     max_value=current_date_cl,
     min_value=d1 if d1 else None,
-    key="date_to"
+    key="date_input_to"
 )
 
 # Validación de rango
@@ -1036,13 +1020,244 @@ sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
 
 st.sidebar.divider()
+
+# ============================================================================
+# CREDENCIALES (AQUÍ, ANTES DEL BOTÓN)
+# ============================================================================
+
+st.sidebar.subheader("🔑 Credenciales API")
+
+# X / Twitter API
+env_x = env("TWITTERAPI_IO_KEY")
+if env_x:
+    api_x = env_x
+    st.sidebar.success("✅ X API cargada desde .env")
+else:
+    api_x = st.sidebar.text_input(
+        "API Key twitterapi.io", 
+        type="password", 
+        key="manual_api_x",
+        help="Ingresa tu API Key de twitterapi.io"
+    )
+    if api_x:
+        st.sidebar.success("✅ X API ingresada")
+    else:
+        st.sidebar.warning("⚠️ X API no configurada")
+
+# Apify Token
+env_apify = env("APIFY_TOKEN")
+if env_apify:
+    api_apify = env_apify
+    st.sidebar.success("✅ Apify Token cargado desde .env")
+else:
+    api_apify = st.sidebar.text_input(
+        "Token Apify", 
+        type="password", 
+        key="manual_api_apify",
+        help="Ingresa tu token de Apify"
+    )
+    if api_apify:
+        st.sidebar.success("✅ Apify Token ingresado")
+    else:
+        st.sidebar.warning("⚠️ Apify Token no configurado")
+
+st.sidebar.divider()
+
+# ============================================================================
+# BOTÓN DE BÚSQUEDA
+# ============================================================================
+
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
 # ============================================================================
-# RENDER DEBUG PANEL (DESPUÉS DE TODO)
+# RENDER DEBUG PANEL (AL FINAL DEL SIDEBAR)
 # ============================================================================
+
 if debug_mode:
     render_debug_panel()
+
+
+# ============================================================================
+# EJECUCIÓN
+# ============================================================================
+
+if run_btn:
+    # Reset states
+    st.session_state["logs"] = []
+    st.session_state["debug_logs"] = []
+    st.session_state["execution_times"] = {}
+    st.session_state["api_responses"] = {}
+    st.session_state["report_figures"] = {}
+    st.session_state["ai_summary"] = None
+    
+    log_message("🚀 Iniciando búsqueda", "info")
+    prog = st.progress(0.0, text="Iniciando...")
+    df = pd.DataFrame()
+    tokens = [t for t in [api_apify] if t]
+
+    try:
+        # 1. FETCHING
+        prog.progress(0.1, text="Obteniendo datos...")
+        
+        if platform.startswith("X"):
+            if not api_x: 
+                st.error("❌ Falta API Key X. Ingresa las credenciales en el sidebar.")
+                log_message("API Key X no configurada", "error")
+                st.stop()
+            if "usuario" in search_mode: 
+                q = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
+            else: 
+                q = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
+            df = fetch_x_cached(api_x, q, limit)
+        
+        elif platform == "Facebook":
+            if not tokens: 
+                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                log_message("Token Apify no configurado", "error")
+                st.stop()
+            mode = "user" if "usuario" in search_mode else "search"
+            q = username_input if mode == "user" else topic
+            df = fetch_facebook_cached(tokens, q, limit, mode)
+            
+        elif platform == "Instagram":
+            if not tokens: 
+                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                log_message("Token Apify no configurado", "error")
+                st.stop()
+            mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
+            q = hashtags_str if mode == "hashtag" else (username_input if mode == "user" else topic)
+            df = fetch_instagram_cached(tokens, q, limit, mode)
+            
+        elif platform == "TikTok":
+            if not tokens: 
+                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                log_message("Token Apify no configurado", "error")
+                st.stop()
+            mode = "user" if "usuario" in search_mode else "hashtag"
+            q = username_input if mode == "user" else topic
+            df = fetch_tiktok_cached(tokens, q, limit, mode)
+
+        prog.progress(0.3, text="Aplicando filtros de fecha...")
+        
+        # APLICAR FILTRO DE FECHAS CON MANEJO DE ERRORES
+        try:
+            df = enforce_date_window(df, d1, d2)
+        except Exception as date_error:
+            log_message(
+                f"Error al filtrar fechas: {date_error}", 
+                "error",
+                {"d1": str(d1), "d2": str(d2), "traceback": traceback.format_exc()}
+            )
+            st.warning("⚠️ No se pudo aplicar el filtro de fechas. Mostrando todos los resultados.")
+        
+        prog.progress(0.4, text="Verificando datos...")
+
+        if df.empty:
+            st.warning("No se encontraron resultados.")
+            log_message("Búsqueda sin resultados", "warning")
+            st.stop()
+
+        log_message(f"✅ Obtenidos {len(df)} posts", "info")
+
+        # 2. IA (DeepSeek Sentimiento + Resumen Ejecutivo)
+        prog.progress(0.5, text="Procesando IA...")
+        
+        if "text" in df.columns:
+            texts = df["text"].tolist()
+            
+            if sentiment:
+                prog.progress(0.6, text="Analizando sentimiento...")
+                with st.spinner("DeepSeek Sentimiento..."): 
+                    df["sentiment"] = analyze_sentiment_deepseek_optimized(texts)
+            
+            if emotions:
+                prog.progress(0.7, text="Analizando emociones...")
+                with st.spinner("DeepSeek Emociones..."): 
+                    df["emotion"] = analyze_emotions_deepseek_optimized(texts)
+            
+            # GENERAR RESUMEN EJECUTIVO
+            prog.progress(0.8, text="Generando resumen ejecutivo...")
+            with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
+                query_context = topic or username_input or hashtags_str
+                summary = generate_executive_summary(df, query_context)
+                st.session_state["ai_summary"] = summary
+
+        prog.progress(1.0, text="✅ Listo")
+        st.session_state["df"] = df
+        log_message("✅ Proceso completado exitosamente", "info")
+        
+    except Exception as e:
+        st.error(f"Error crítico: {e}")
+        log_message(str(e), "error", {"traceback": traceback.format_exc()})
+        if st.session_state.get("debug_mode"):
+            st.exception(e)
+    
+    finally:
+        prog.empty()
+
+
+# ============================================================================
+# VISUALIZACIÓN & REPORTE (SIN CAMBIOS)
+# ============================================================================
+
+df = st.session_state.get("df")
+ai_summary = st.session_state.get("ai_summary")
+
+if df is not None and not df.empty:
+    
+    # 0. MOSTRAR RESUMEN IA
+    if ai_summary:
+        st.info(f"🤖 **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
+
+    # Crisis Alert
+    crisis_data = detect_crisis_signals(df)
+    if crisis_data["score"] > 0:
+        c_color = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(crisis_data["severity"],"⚪")
+        st.header(f"{c_color} Alerta de Crisis")
+        col1, col2 = st.columns([1,3])
+        col1.metric("Score Crisis", f"{crisis_data['score']}/100")
+        with col2:
+            for s in crisis_data["signals"]: st.write(f"• {s}")
+        
+        if not crisis_data["crisis_posts"].empty:
+            st.warning("⚠️ Se han detectado los siguientes posts conflictivos:")
+            cols_to_show = ["created_at", "username", "text", "likes", "url"]
+            cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
+            st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
+            st.download_button(
+                label="📥 Descargar Posts de Crisis (Excel)",
+                data=df_to_excel_bytes(crisis_data["crisis_posts"]),
+                file_name="reporte_crisis.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="btn_download_crisis"
+            )
+        
+        st.divider()
+
+    # KPIs
+    st.header("📈 Dashboard")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Posts", len(df))
+    k2.metric("Likes", int(df["likes"].sum()))
+    k3.metric("Comentarios", int(df["comments"].sum()))
+    k4.metric("Vistas", int(df["views"].sum()) if "views" in df else 0)
+
+    # Gráficos con CAPTURA
+    st.header("📊 Visualizaciones")
+    tabs = st.tabs(["📅 Temporal", "🧠 Sentimiento", "🎭 Emociones", "🏷️ Temas", "☁️ Nube"])
+    current_figures = {}
+
+    with tabs[0]:
+        if "fecha_cl" in df.columns:
+            by_day = df["fecha_cl"].value_counts().sort_index()
+            if not by_day.empty:
+                fig, ax = plt.subplots(figsize=(10,4))
+                dates_str = [str(d) for d in by_day.index]
+                ax.bar(dates_str, by_day.values, color="#2ca02c")
+                ax.set_title("Evolución diaria")
+                plt.xticks(rotation=45)
+                st.pyplot(fig)
+                current_figures["evolucion"] = fig_to_bytes(fig)
 
 
 
