@@ -1,6 +1,6 @@
-# Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "JP" Persona - V6.7.1 (Enhanced with AI Summary)
-# UI: Español | Feat: Stealth Credentials + Email Reporting + AI Analyst (Specific Citations)
+# Streamlit Social Listening: X (twitterapi.io) + Apify
+# Versión V6.8 - Debug Mode & Fixes
+# Optimizado por "JP" Persona
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
@@ -27,7 +27,7 @@ import logging
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "JP Release v6.7.1 - AI Summary & Citations"
+BUILD_TAG = "JP Release v6.8 - Debug Mode Enabled"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(level=logging.INFO)
@@ -44,8 +44,8 @@ load_dotenv()
 # SESSION STATE & UTILS
 # ============================================================================
 
-# Agregamos 'ai_summary' al estado
-for k, v in {"df": None, "params": {}, "query_str": None, "logs": [], "report_figures": {}, "ai_summary": None}.items():
+# Inicializar estado
+for k, v in {"df": None, "params": {}, "query_str": None, "logs": [], "report_figures": {}, "ai_summary": None, "debug_mode": False}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
@@ -59,6 +59,18 @@ def log_message(msg: str, level: str = "info"):
     if level == "error": logger.error(msg)
     elif level == "warning": logger.warning(msg)
     else: logger.info(msg)
+
+def debug_msg(title: str, data: Any):
+    """Muestra información técnica solo si el modo debug está activo."""
+    if st.session_state.get("debug_mode"):
+        with st.expander(f"🐞 DEBUG: {title}", expanded=False):
+            if isinstance(data, (pd.DataFrame, pd.Series)):
+                st.write(f"Shape: {data.shape}")
+                st.dataframe(data.head())
+            elif isinstance(data, (dict, list)):
+                st.json(data)
+            else:
+                st.code(str(data))
 
 # ============================================================================
 # LOGIN SEGURO
@@ -89,14 +101,12 @@ if "logged_in" not in st.session_state or not st.session_state['logged_in']:
 # ============================================================================
 
 def fig_to_bytes(fig) -> bytes:
-    """Convierte una figura de Matplotlib a bytes PNG para adjuntar."""
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight')
     buf.seek(0)
     return buf.read()
 
 def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
-    """Envía correo con Excel, CSV y gráficos adjuntos."""
     smtp_server = env("SMTP_HOST") or "smtp.gmail.com"
     smtp_port = int(env("SMTP_PORT") or 587)
     smtp_user = env("SMTP_USER")
@@ -110,10 +120,8 @@ def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
     msg['To'] = to_email
     msg['Subject'] = subject
     
-    # Cuerpo del mensaje codificado en UTF-8 para soportar tildes/emojis
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-    # Adjuntar Excel
     if df_xlsx:
         part = MIMEBase('application', "octet-stream")
         part.set_payload(df_xlsx)
@@ -121,7 +129,6 @@ def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
         part.add_header('Content-Disposition', 'attachment; filename="reporte_data.xlsx"')
         msg.attach(part)
 
-    # Adjuntar CSV
     if df_csv:
         part = MIMEBase('application', "octet-stream")
         part.set_payload(df_csv)
@@ -129,7 +136,6 @@ def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
         part.add_header('Content-Disposition', 'attachment; filename="reporte_data.csv"')
         msg.attach(part)
 
-    # Adjuntar Imágenes
     for name, fig_bytes in figures_dict.items():
         image = MIMEImage(fig_bytes, name=f"{name}.png")
         image.add_header('Content-Disposition', f'attachment; filename="{name}.png"')
@@ -149,25 +155,20 @@ def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
 # MOTOR IA (DEEPSEEK: SENTIMIENTO + RESUMEN)
 # ============================================================================
 
-# --- NUEVA FUNCIÓN: Generador de Resumen con Citas Específicas ---
 def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
-    """Genera un resumen narrativo citando posts específicos."""
     key = env("DEEPSEEK_API_KEY")
     if not key or df.empty: return "Resumen no disponible (Falta API Key o Datos)."
     
-    # 1. Preparar Contexto
     total = len(df)
     sent_counts = df["sentiment"].value_counts(normalize=True).to_dict() if "sentiment" in df else {}
     
-    # Extraer Top 3 Posts por Likes para citarlos
-    # Nos aseguramos que las columnas existan
     if "likes" in df.columns and "text" in df.columns:
         top_posts = df.sort_values("likes", ascending=False).head(3)
         top_texts_list = []
         for _, row in top_posts.iterrows():
             user = row.get("username", "Anon")
-            txt = row["text"][:100].replace("\n", " ") # Recortar texto
-            likes = row["likes"]
+            txt = str(row["text"])[:100].replace("\n", " ")
+            likes = row.get("likes", 0)
             top_texts_list.append(f"- Usuario @{user}: '{txt}...' ({int(likes)} likes)")
         top_posts_str = "\n".join(top_texts_list)
     else:
@@ -186,10 +187,12 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
         f"DATOS:\n{context}\n\n"
         f"INSTRUCCIONES CLAVE:\n"
         f"1. Resume la tendencia general de sentimiento y emociones.\n"
-        f"2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados en los datos para explicar qué está impulsando la conversación. Menciona el usuario y qué dijo brevemente.\n"
-        f"3. Entrega un resumen de métricas: posteos, interacciones y visualizaciones en el caso de que estén"
+        f"2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados en los datos.\n"
+        f"3. Entrega un resumen de métricas.\n"
         f"4. Mantén un tono profesional."
     )
+
+    debug_msg("Prompt DeepSeek Resumen", prompt)
 
     try:
         r = requests.post(
@@ -198,10 +201,11 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
             json={
                 "model": "deepseek-chat",
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3, # Baja temperatura para precisión en citas
-                "max_tokens": 300
+                "temperature": 0.3,
+                "max_tokens": 500
             }, timeout=25
         )
+        debug_msg("DeepSeek Response Status", r.status_code)
         if r.status_code == 200:
             return r.json()['choices'][0]['message']['content'].strip()
         else:
@@ -209,7 +213,6 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
     except Exception as e:
         return f"Error generando resumen: {e}"
 
-# --- Funciones Async Existentes ---
 async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, sem: asyncio.Semaphore, max_tokens: int = 10) -> str:
     deepseek_key = env("DEEPSEEK_API_KEY")
     if not deepseek_key: return "NEU"
@@ -238,7 +241,7 @@ async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
     async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
-            safe_text = text[:300] if text else ""
+            safe_text = str(text)[:300] if text else ""
             prompt = f"Clasifica el sentimiento: '{safe_text}'. Responde EXCLUSIVAMENTE con una palabra: POS, NEG o NEU."
             tasks.append(async_fetch_deepseek(client, prompt, sem, 5))
         results = await asyncio.gather(*tasks)
@@ -258,7 +261,7 @@ async def process_emotions_batch_async(texts: List[str]) -> List[str]:
     async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
         tasks = []
         for text in texts:
-            safe_text = text[:300] if text else ""
+            safe_text = str(text)[:300] if text else ""
             prompt = f"Detecta la emoción en: '{safe_text}'. Opciones: {', '.join(valid_emotions)}. Responde SOLO con la palabra clave."
             tasks.append(async_fetch_deepseek(client, prompt, sem, 10))
         results = await asyncio.gather(*tasks)
@@ -303,10 +306,15 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
     valid_tokens = [t for t in tokens if t and t.strip()]
     if not valid_tokens: return []
 
+    debug_msg(f"Iniciando Actor Apify ({actor_id})", payload)
+
     for i, token in enumerate(valid_tokens):
         url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
         try:
             r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
+            
+            debug_msg(f"Apify Run Init Status: {r.status_code}", r.text)
+
             if r.status_code not in [200, 201]: continue
 
             run_data = r.json()["data"]
@@ -320,9 +328,12 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
                     if r_poll.status_code == 200:
                         status = r_poll.json()["data"]["status"]
                         if status == "SUCCEEDED": return get_apify_items_sync(dataset_id, token)
-                        elif status in ["FAILED", "ABORTED", "TIMED-OUT"]: break
+                        elif status in ["FAILED", "ABORTED", "TIMED-OUT"]: 
+                            debug_msg(f"Actor Failed with status: {status}", r_poll.text)
+                            break
                 except: continue
-        except Exception:
+        except Exception as e:
+            debug_msg(f"Excepción Apify: {str(e)}", "Check Logs")
             if i < len(valid_tokens) - 1: continue
     return []
 
@@ -372,11 +383,17 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
     all_rows = []
     cursor = None
     max_loops = (limit // 20) + 5 
+    
+    debug_msg(f"Iniciando Búsqueda X", {"Query": query, "Limit": limit})
+
     for _ in range(max_loops):
         params = {"query": query, "queryType": "Latest"}
         if cursor: params["cursor"] = cursor
         try:
             r = requests.get(API_URL_X, headers=headers, params=params, timeout=20)
+            
+            debug_msg(f"X API Response ({r.status_code})", r.text[:500]) # Muestra solo el inicio para no saturar
+
             if r.status_code != 200: break
             data = r.json()
             tweets = data.get("tweets", [])
@@ -394,7 +411,10 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
             if len(all_rows) >= limit: break
             cursor = data.get("next_cursor") if data.get("has_next_page") else None
             if not cursor: break
-        except Exception: break
+        except Exception as e: 
+            debug_msg("Error en Loop X", str(e))
+            break
+    
     return normalize_common_optimized(all_rows, "x")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -472,7 +492,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 # ============================================================================
-# FUNCIONES VISUALES
+# VISUALES
 # ============================================================================
 
 def plot_pie_chart(series, title):
@@ -616,6 +636,10 @@ sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
 
 st.sidebar.divider()
+debug_mode = st.sidebar.checkbox("🐞 Modo Debug", value=False, help="Muestra respuestas crudas de APIs y logs técnicos.")
+st.session_state["debug_mode"] = debug_mode
+
+st.sidebar.divider()
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
 # Credenciales Stealth
@@ -630,8 +654,8 @@ api_apify = env_apify if env_apify else st.sidebar.text_input("Token Apify", typ
 
 if run_btn:
     st.session_state["logs"] = []
-    st.session_state["report_figures"] = {} # Limpiar figuras previas
-    st.session_state["ai_summary"] = None # Reset resumen
+    st.session_state["report_figures"] = {} 
+    st.session_state["ai_summary"] = None
     prog = st.progress(0.0, text="Iniciando...")
     df = pd.DataFrame()
     tokens = [t for t in [api_apify] if t]
@@ -663,6 +687,9 @@ if run_btn:
             df = fetch_tiktok_cached(tokens, q, limit, mode)
 
         df = enforce_date_window(df, d1, d2)
+        
+        debug_msg("DataFrame Final (Pre-IA)", df)
+
         prog.progress(0.5, text="Procesando IA...")
 
         if df.empty:
@@ -677,8 +704,7 @@ if run_btn:
             if emotions:
                 with st.spinner("DeepSeek Emociones..."): df["emotion"] = analyze_emotions_deepseek_optimized(texts)
             
-            # --- GENERAR RESUMEN EJECUTIVO ---
-            with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
+            with st.spinner("Redactando Resumen Ejecutivo..."):
                 query_context = topic or username_input or hashtags_str
                 summary = generate_executive_summary(df, query_context)
                 st.session_state["ai_summary"] = summary
@@ -689,6 +715,7 @@ if run_btn:
     except Exception as e:
         st.error(f"Error: {e}")
         log_message(str(e), "error")
+        debug_msg("Excepción General", str(e))
     
     prog.empty()
 
@@ -701,12 +728,10 @@ ai_summary = st.session_state.get("ai_summary")
 
 if df is not None and not df.empty:
     
-    # 0. MOSTRAR RESUMEN IA
     if ai_summary:
         st.info(f"🤖 **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
 
     # Crisis Alert
- # Crisis Alert
     crisis_data = detect_crisis_signals(df)
     if crisis_data["score"] > 0:
         c_color = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(crisis_data["severity"],"⚪")
@@ -716,20 +741,12 @@ if df is not None and not df.empty:
         with col2:
             for s in crisis_data["signals"]: st.write(f"• {s}")
         
-        # --- AQUÍ ESTÁ EL ARREGLO ---
-        # Verificamos si hay posts de crisis y los mostramos
         if not crisis_data["crisis_posts"].empty:
             st.warning("⚠️ Se han detectado los siguientes posts conflictivos:")
-            
-            # 1. Mostrar tabla visual en la App
-            # Seleccionamos solo columnas relevantes para que se vea ordenado
             cols_to_show = ["created_at", "username", "text", "likes", "url"]
-            # Filtramos para que no falle si alguna columna no existe (ej: url)
             cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
-            
             st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
             
-            # 2. Botón para DESCARGAR (EXPORTAR) solo los posts de crisis
             st.download_button(
                 label="📥 Descargar Posts de Crisis (Excel)",
                 data=df_to_excel_bytes(crisis_data["crisis_posts"]),
@@ -737,8 +754,6 @@ if df is not None and not df.empty:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="btn_download_crisis"
             )
-        # ----------------------------
-        
         st.divider()
 
     # KPIs
@@ -749,7 +764,7 @@ if df is not None and not df.empty:
     k3.metric("Comentarios", int(df["comments"].sum()))
     k4.metric("Vistas", int(df["views"].sum()) if "views" in df else 0)
 
-    # Gráficos con CAPTURA
+    # Gráficos
     st.header("📊 Visualizaciones")
     tabs = st.tabs(["📅 Temporal", "🧠 Sentimiento", "🎭 Emociones", "🏷️ Temas", "☁️ Nube"])
     current_figures = {}
@@ -804,7 +819,6 @@ if df is not None and not df.empty:
         if "text" in df.columns:
             topics = extract_topics(df["text"].tolist())
             st.bar_chart(pd.Series(topics))
-            # Crear figura Matplotlib para el reporte
             fig_t, ax_t = plt.subplots()
             ax_t.bar(list(topics.keys()), list(topics.values()))
             ax_t.set_title("Top Tópicos")
@@ -829,33 +843,39 @@ if df is not None and not df.empty:
     st.header("📧 Enviar Reporte")
     with st.expander("Configuración de Envío", expanded=True):
         email_to = st.text_input("Destinatario", placeholder="jp@empresa.com")
+        
         if st.button("Enviar Reporte Completo", use_container_width=True):
-            if not email_to: st.error("Ingresa un correo.")
-            elif not st.session_state["report_figures"]: st.warning("Genera gráficos primero.")
+            if not email_to: 
+                st.error("Ingresa un correo.")
+            elif not st.session_state["report_figures"]: 
+                st.warning("Genera gráficos primero.")
             else:
                 with st.spinner("Enviando..."):
-                    # Construcción del cuerpo del correo CON el resumen y citas
-                    # Construcción del cuerpo del correo CON el resumen y citas
                     query_val = topic or username_input or hashtags_str
-                    
-                    # CORRECCIÓN AQUÍ: Usamos SCL_TZ para la fecha exacta
                     fecha_reporte = datetime.now(SCL_TZ).strftime('%d/%m/%Y %H:%M')
                     
-                    email_body = (
-                        f"REPORTE SOCIAL LISTENING PRO\n"
-                        f"============================\n"
-                        f"Fecha de generación: {fecha_reporte}\n"
-                        f"Plataforma: {platform}\n"
-                        f"Búsqueda: {query_val}\n\n"
-                        f"RESUMEN EJECUTIVO (IA):\n"
-                        f"{ai_summary if ai_summary else 'No disponible.'}\n\n"
-                        f"METRICAS GENERALES:\n"
-                        f"- Total Posts: {len(df)}\n"
-                        f"- Interacciones Totales: {int(df['likes'].sum() + df['comments'].sum())}\n"
-                        # CORRECCIÓN AQUÍ: Agregamos .sum() a las vistas
-                        f"- Visualizaciones: {int(df['views'].sum())}\n\n"
-                        f"Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
-                    )
+                    total_posts = len(df)
+                    total_interacciones = int(df['likes'].sum() + df['comments'].sum())
+                    total_vistas = int(df['views'].sum()) if 'views' in df.columns else 0
+                    
+                    resumen_texto = ai_summary if ai_summary else 'No disponible.'
+
+                    email_body = f"""REPORTE SOCIAL LISTENING PRO
+============================
+Fecha de generación: {fecha_reporte}
+Plataforma: {platform}
+Búsqueda: {query_val}
+
+RESUMEN EJECUTIVO (IA):
+{resumen_texto}
+
+METRICAS GENERALES:
+- Total Posts: {total_posts}
+- Interacciones Totales: {total_interacciones}
+- Visualizaciones: {total_vistas}
+
+Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.
+"""
                     success, msg = send_email_report(
                         email_to, 
                         f"Reporte: {platform} - {query_val}", 
@@ -864,6 +884,7 @@ if df is not None and not df.empty:
                         df_to_csv_bytes(df), 
                         st.session_state["report_figures"]
                     )
+                    
                     if success: st.success(f"✅ {msg}")
                     else: st.error(f"❌ {msg}")
 
@@ -871,3 +892,13 @@ if df is not None and not df.empty:
     c1, c2 = st.columns(2)
     c1.download_button("📥 Excel", df_to_excel_bytes(df), "reporte.xlsx")
     c2.download_button("📥 CSV", df_to_csv_bytes(df), "reporte.csv")
+
+# ============================================================================
+# SYSTEM LOGS (DEBUG FOOTER)
+# ============================================================================
+
+if st.session_state.get("debug_mode") and st.session_state["logs"]:
+    st.divider()
+    st.subheader("🐞 System Logs")
+    log_text = "\n".join(st.session_state["logs"])
+    st.text_area("Log Output", log_text, height=200)
