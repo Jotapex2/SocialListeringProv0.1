@@ -933,16 +933,39 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
 # INTERFAZ STREAMLIT
 # ============================================================================
 
-
 st.title("📡 Social Listening Pro — X + Instagram + Facebook + TikTok")
 st.markdown("**Análisis avanzado con detección de crisis, sentimiento y reporte por email**")
 
-
 st.sidebar.header("⚙️ Configuración")
 
-# DEBUG MODE TOGGLE (destacado arriba)
+# ============================================================================
+# CREDENCIALES (PRIMERO, ANTES DEL DEBUG)
+# ============================================================================
 st.sidebar.markdown("---")
-debug_mode = st.sidebar.checkbox("🐛 **Modo Debug**", value=st.session_state.get("debug_mode", False))
+st.sidebar.subheader("🔑 Credenciales API")
+
+env_x = env("TWITTERAPI_IO_KEY")
+api_x = env_x if env_x else st.sidebar.text_input("API Key twitterapi.io", type="password", key="input_api_x")
+
+env_apify = env("APIFY_TOKEN")
+api_apify = env_apify if env_apify else st.sidebar.text_input("Token Apify", type="password", key="input_api_apify")
+
+# Mostrar estado de credenciales
+if api_x:
+    st.sidebar.success("✅ X API configurada")
+else:
+    st.sidebar.warning("⚠️ X API faltante")
+
+if api_apify:
+    st.sidebar.success("✅ Apify configurada")
+else:
+    st.sidebar.warning("⚠️ Apify faltante")
+
+# ============================================================================
+# DEBUG MODE TOGGLE
+# ============================================================================
+st.sidebar.markdown("---")
+debug_mode = st.sidebar.checkbox("🐛 **Modo Debug**", value=st.session_state.get("debug_mode", False), key="toggle_debug")
 st.session_state["debug_mode"] = debug_mode
 
 if debug_mode:
@@ -950,8 +973,11 @@ if debug_mode:
 
 st.sidebar.markdown("---")
 
-platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
+# ============================================================================
+# CONFIGURACIÓN DE BÚSQUEDA
+# ============================================================================
 
+platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
 
 if platform == "Instagram":
     search_mode = st.sidebar.radio("Modo", ["Por temática (hashtags)", "Por temática (búsqueda IG)", "Por usuario"])
@@ -960,11 +986,9 @@ elif platform == "Facebook":
 else:
     search_mode = st.sidebar.radio("Modo", ["Por temática", "Por usuario"])
 
-
 topic = ""
 username_input = ""
 hashtags_str = ""
-
 
 if search_mode.startswith("Por temática"):
     if platform == "Instagram" and "hashtags" in search_mode:
@@ -974,41 +998,52 @@ if search_mode.startswith("Por temática"):
 else:
     username_input = st.sidebar.text_input("Usuario(s) (separar por coma)")
 
-
 lang = st.sidebar.selectbox("Idioma (solo X)", ["", "es", "en", "pt"], index=1)
 col1, col2 = st.sidebar.columns(2)
 exclude_rt = col1.checkbox("Excluir RTs [X]", value=True)
 exclude_repl = col2.checkbox("Excluir respuestas [X]", value=True)
 filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo Chile (X)")
 
-
 st.sidebar.divider()
-d1 = st.sidebar.date_input("Desde", value=datetime.now(SCL_TZ).date() - timedelta(days=14))
-d2 = st.sidebar.date_input("Hasta", value=datetime.now(SCL_TZ).date())
 
+# Fechas con validación
+current_date_cl = datetime.now(SCL_TZ).date()
+default_start = current_date_cl - timedelta(days=14)
+
+d1 = st.sidebar.date_input(
+    "Desde", 
+    value=default_start,
+    max_value=current_date_cl,
+    key="date_from"
+)
+
+d2 = st.sidebar.date_input(
+    "Hasta", 
+    value=current_date_cl,
+    max_value=current_date_cl,
+    min_value=d1 if d1 else None,
+    key="date_to"
+)
+
+# Validación de rango
+if d1 and d2 and d1 > d2:
+    st.sidebar.error("⚠️ Fecha 'Desde' no puede ser posterior a 'Hasta'")
 
 limit = st.sidebar.slider("Límite de posts", 50, 2000, 200)
 max_words = st.sidebar.slider("Máx. palabras nube", 50, 500, 200)
 
-
 sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
-
 
 st.sidebar.divider()
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
-
-# Credenciales Stealth
-env_x = env("TWITTERAPI_IO_KEY")
-api_x = env_x if env_x else st.sidebar.text_input("API Key twitterapi.io", type="password")
-env_apify = env("APIFY_TOKEN")
-api_apify = env_apify if env_apify else st.sidebar.text_input("Token Apify", type="password")
-
-
-# RENDER DEBUG PANEL
+# ============================================================================
+# RENDER DEBUG PANEL (DESPUÉS DE TODO)
+# ============================================================================
 if debug_mode:
     render_debug_panel()
+
 
 
 # ============================================================================
