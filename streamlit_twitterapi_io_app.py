@@ -1258,180 +1258,7 @@ if df is not None and not df.empty:
                 plt.xticks(rotation=45)
                 st.pyplot(fig)
                 current_figures["evolucion"] = fig_to_bytes(fig)
-
-
-
-# ============================================================================
-# EJECUCIÓN
-# ============================================================================
-
-
-if run_btn:
-    # Reset states
-    st.session_state["logs"] = []
-    st.session_state["debug_logs"] = []
-    st.session_state["execution_times"] = {}
-    st.session_state["api_responses"] = {}
-    st.session_state["report_figures"] = {}
-    st.session_state["ai_summary"] = None
-    
-    log_message("🚀 Iniciando búsqueda", "info")
-    prog = st.progress(0.0, text="Iniciando...")
-    df = pd.DataFrame()
-    tokens = [t for t in [api_apify] if t]
-
-
-    try:
-        # 1. FETCHING
-        if platform.startswith("X"):
-            if not api_x: 
-                st.error("Falta API Key X")
-                log_message("API Key X no configurada", "error")
-                st.stop()
-            if "usuario" in search_mode: q = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
-            else: q = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
-            df = fetch_x_cached(api_x, q, limit)
-        
-        elif platform == "Facebook":
-            if not tokens: 
-                st.error("Falta Token Apify")
-                log_message("Token Apify no configurado", "error")
-                st.stop()
-            mode = "user" if "usuario" in search_mode else "search"
-            q = username_input if mode == "user" else topic
-            df = fetch_facebook_cached(tokens, q, limit, mode)
-            
-        elif platform == "Instagram":
-            if not tokens: 
-                st.error("Falta Token Apify")
-                log_message("Token Apify no configurado", "error")
-                st.stop()
-            mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
-            q = hashtags_str if mode == "hashtag" else (username_input if mode == "user" else topic)
-            df = fetch_instagram_cached(tokens, q, limit, mode)
-            
-        elif platform == "TikTok":
-            if not tokens: 
-                st.error("Falta Token Apify")
-                log_message("Token Apify no configurado", "error")
-                st.stop()
-            mode = "user" if "usuario" in search_mode else "hashtag"
-            q = username_input if mode == "user" else topic
-            df = fetch_tiktok_cached(tokens, q, limit, mode)
-
-
-        df = enforce_date_window(df, d1, d2)
-        prog.progress(0.5, text="Procesando IA...")
-
-
-        if df.empty:
-            st.warning("No se encontraron resultados.")
-            log_message("Búsqueda sin resultados", "warning")
-            st.stop()
-
-
-        log_message(f"✅ Obtenidos {len(df)} posts", "info")
-
-
-        # 2. IA (DeepSeek Sentimiento + Resumen Ejecutivo)
-        if "text" in df.columns:
-            texts = df["text"].tolist()
-            if sentiment:
-                with st.spinner("DeepSeek Sentimiento..."): 
-                    df["sentiment"] = analyze_sentiment_deepseek_optimized(texts)
-            if emotions:
-                with st.spinner("DeepSeek Emociones..."): 
-                    df["emotion"] = analyze_emotions_deepseek_optimized(texts)
-            
-            # GENERAR RESUMEN EJECUTIVO
-            with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
-                query_context = topic or username_input or hashtags_str
-                summary = generate_executive_summary(df, query_context)
-                st.session_state["ai_summary"] = summary
-
-
-        prog.progress(1.0, text="Listo")
-        st.session_state["df"] = df
-        log_message("✅ Proceso completado exitosamente", "info")
-        
-    except Exception as e:
-        st.error(f"Error: {e}")
-        log_message(str(e), "error", {"traceback": traceback.format_exc()})
-    
-    prog.empty()
-
-
-# ============================================================================
-# VISUALIZACIÓN & REPORTE
-# ============================================================================
-
-
-df = st.session_state.get("df")
-ai_summary = st.session_state.get("ai_summary")
-
-
-if df is not None and not df.empty:
-    
-    # 0. MOSTRAR RESUMEN IA
-    if ai_summary:
-        st.info(f"🤖 **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
-
-
-    # Crisis Alert
-    crisis_data = detect_crisis_signals(df)
-    if crisis_data["score"] > 0:
-        c_color = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(crisis_data["severity"],"⚪")
-        st.header(f"{c_color} Alerta de Crisis")
-        col1, col2 = st.columns([1,3])
-        col1.metric("Score Crisis", f"{crisis_data['score']}/100")
-        with col2:
-            for s in crisis_data["signals"]: st.write(f"• {s}")
-        
-        if not crisis_data["crisis_posts"].empty:
-            st.warning("⚠️ Se han detectado los siguientes posts conflictivos:")
-            cols_to_show = ["created_at", "username", "text", "likes", "url"]
-            cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
-            st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
-            st.download_button(
-                label="📥 Descargar Posts de Crisis (Excel)",
-                data=df_to_excel_bytes(crisis_data["crisis_posts"]),
-                file_name="reporte_crisis.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="btn_download_crisis"
-            )
-        
-        st.divider()
-
-
-    # KPIs
-    st.header("📈 Dashboard")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Posts", len(df))
-    k2.metric("Likes", int(df["likes"].sum()))
-    k3.metric("Comentarios", int(df["comments"].sum()))
-    k4.metric("Vistas", int(df["views"].sum()) if "views" in df else 0)
-
-
-    # Gráficos con CAPTURA
-    st.header("📊 Visualizaciones")
-    tabs = st.tabs(["📅 Temporal", "🧠 Sentimiento", "🎭 Emociones", "🏷️ Temas", "☁️ Nube"])
-    current_figures = {}
-
-
-    with tabs[0]:
-        if "created_at_cl" in df.columns:
-            df_t = df.copy()
-            df_t["fecha"] = df_t["created_at_cl"].dt.date
-            by_day = df_t["fecha"].value_counts().sort_index()
-            if not by_day.empty:
-                fig, ax = plt.subplots(figsize=(10,4))
-                ax.bar(by_day.index.astype(str), by_day.values, color="#2ca02c")
-                ax.set_title("Evolución diaria")
-                plt.xticks(rotation=45)
-                st.pyplot(fig)
-                current_figures["evolucion"] = fig_to_bytes(fig)
                 plt.close(fig)
-
 
     with tabs[1]:
         if "sentiment" in df.columns:
@@ -1449,7 +1276,6 @@ if df is not None and not df.empty:
                     current_figures["sentimiento_bar"] = fig_to_bytes(fig2)
                     plt.close(fig2)
 
-
     with tabs[2]:
         if "emotion" in df.columns:
             c1, c2 = st.columns(2)
@@ -1466,7 +1292,6 @@ if df is not None and not df.empty:
                     current_figures["emociones_bar"] = fig_to_bytes(fig4)
                     plt.close(fig4)
 
-
     with tabs[3]:
         if "text" in df.columns:
             topics = extract_topics(df["text"].tolist())
@@ -1478,7 +1303,6 @@ if df is not None and not df.empty:
             current_figures["top_topicos"] = fig_to_bytes(fig_t)
             plt.close(fig_t)
 
-
     with tabs[4]:
         if "text" in df.columns:
             blob = clean_texts(df["text"])
@@ -1488,9 +1312,7 @@ if df is not None and not df.empty:
                 current_figures["wordcloud"] = fig_to_bytes(fig_wc)
                 plt.close(fig_wc)
 
-
     st.session_state["report_figures"] = current_figures
-
 
     st.divider()
     
@@ -1531,7 +1353,6 @@ if df is not None and not df.empty:
                     if success: st.success(f"✅ {msg}")
                     else: st.error(f"❌ {msg}")
 
-
     # Descargas Manuales
     c1, c2 = st.columns(2)
     c1.download_button("📥 Excel", df_to_excel_bytes(df), "reporte.xlsx")
@@ -1541,7 +1362,6 @@ if df is not None and not df.empty:
 # ============================================================================
 # FOOTER CON LOGS (SIEMPRE VISIBLE)
 # ============================================================================
-
 
 if st.session_state.get("logs"):
     with st.expander("📋 Logs de Ejecución", expanded=False):
