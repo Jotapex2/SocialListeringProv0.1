@@ -567,10 +567,10 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
 
 @measure_time("normalize_common")
 def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
+    """Normaliza datos de diferentes plataformas con manejo robusto de timezone."""
     log_message(f"Normalizando {len(rows)} filas de {platform}", "debug")
     df = pd.DataFrame(rows)
     if df.empty: return df
-
 
     col_map = {
         "text": ["caption", "description", "title", "text", "message", "postText"],
@@ -582,34 +582,66 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
         "created_at": ["timestamp", "takenAt", "createTimeISO", "createdAt", "date", "time"]
     }
 
-
     for target, candidates in col_map.items():
         if target not in df.columns:
             for c in candidates:
-                if c in df.columns: df[target] = df[c]; break
+                if c in df.columns: 
+                    df[target] = df[c]
+                    break
             if target not in df.columns: 
                 df[target] = 0 if target in ["likes", "comments", "shares", "views", "followers"] else None
 
-
+    # CONVERSIÓN DE FECHAS MEJORADA
     if "created_at" in df.columns:
-        df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
-        df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
-        df["fecha_cl"] = df["created_at_cl"].dt.date
+        try:
+            # Convertir a UTC primero
+            df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+            
+            # Convertir a Chile con manejo de DST
+            df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
+            
+            # Extraer fecha simple (evita problemas de DST)
+            df["fecha_cl"] = df["created_at_cl"].dt.date
+            
+            # Contar conversiones fallidas
+            failed_conversions = df["created_at_cl"].isna().sum()
+            if failed_conversions > 0:
+                log_message(
+                    f"⚠️ {failed_conversions} fechas no pudieron convertirse", 
+                    "warning",
+                    {"platform": platform, "failed": failed_conversions}
+                )
+        except Exception as e:
+            log_message(f"Error en conversión de fechas: {e}", "error")
+            # Crear columnas vacías si falla
+            df["created_at_utc"] = pd.NaT
+            df["created_at_cl"] = pd.NaT
+            df["fecha_cl"] = None
     
+    # Usuario
     if "username" not in df.columns:
         for c in ["ownerUsername", "authorUsername", "username", "author", "pageName"]:
             if c in df.columns:
                 df["username"] = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
                 break
     
-    if "text" in df.columns: df["text"] = df["text"].fillna("").astype(str)
+    # Texto
+    if "text" in df.columns: 
+        df["text"] = df["text"].fillna("").astype(str)
     
+    # Métricas numéricas
     for col in ["likes", "comments", "shares", "views", "followers"]:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
+        if col in df.columns: 
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     df["platform"] = platform
-    log_message(f"Normalización completa: {df.shape}", "debug")
+    
+    log_message(f"Normalización completa: {df.shape}", "debug", {
+        "rows": len(df),
+        "columns": len(df.columns),
+        "null_dates": df["created_at_cl"].isna().sum() if "created_at_cl" in df.columns else 0
+    })
+    
     return df
 
 
@@ -724,14 +756,45 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
 
 
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
-    if df is None or df.empty or "created_at_cl" not in df.columns: return df
-    mask = pd.Series(True, index=df.index)
-    series_normalized = df["created_at_cl"].dt.normalize()
-    if d1: mask &= ((series_normalized >= pd.Timestamp(d1).tz_localize(SCL_TZ, nonexistent="shift_forward")) | (series_normalized.isna()))
-    if d2: mask &= ((series_normalized <= pd.Timestamp(d2).tz_localize(SCL_TZ, nonexistent="shift_forward")) | (series_normalized.isna()))
-    filtered = df.loc[mask].copy()
-    log_message(f"Filtrado de fechas: {len(df)} → {len(filtered)}", "debug")
-    return filtered
+    """Filtra DataFrame por ventana de fechas (versión simplificada sin DST issues)."""
+    if df is None or df.empty:
+        return df
+    
+    if "created_at_cl" not in df.columns:
+        log_message("Columna 'created_at_cl' no encontrada", "warning")
+        return df
+    
+    # Validar fechas
+    current = datetime.now(SCL_TZ).date()
+    if d1 and d1 > current:
+        d1 = current
+    if d2 and d2 > current:
+        d2 = current
+    
+    try:
+        # Convertir columna a fecha simple (sin hora ni timezone)
+        df_dates = df["created_at_cl"].dt.date
+        
+        # Aplicar filtros
+        mask = pd.Series(True, index=df.index)
+        
+        if d1:
+            mask &= ((df_dates >= d1) | (df_dates.isna()))
+        
+        if d2:
+            mask &= ((df_dates <= d2) | (df_dates.isna()))
+        
+        filtered = df.loc[mask].copy()
+        
+        removed = len(df) - len(filtered)
+        log_message(f"Filtrado: {len(df)} → {len(filtered)} posts ({removed} removidos)", "info")
+        
+        return filtered
+        
+    except Exception as e:
+        log_message(f"Error en filtrado de fechas: {e}", "error")
+        return df  # Devolver original si falla
+
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
