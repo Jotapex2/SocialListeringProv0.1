@@ -748,7 +748,7 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
     """
     Filtra DataFrame por ventana de fechas.
-    Usa fecha_cl (date objects) directamente, SIN timezone.
+    Maneja correctamente comparaciones entre date y datetime64.
     """
     if df is None or df.empty:
         return df
@@ -767,15 +767,28 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
         d2 = current
     
     try:
-        # Filtrar usando date objects directamente (sin timezone issues)
-        mask = pd.Series(True, index=df.index)
+        # Crear copia de trabajo
+        df_work = df.copy()
         
+        # Asegurar que fecha_cl sea tipo date (no datetime)
+        # Convertir cualquier datetime64 a date
+        if pd.api.types.is_datetime64_any_dtype(df_work["fecha_cl"]):
+            df_work["fecha_cl"] = pd.to_datetime(df_work["fecha_cl"]).dt.date
+        
+        # Crear máscara de filtrado
+        mask = pd.Series(True, index=df_work.index)
+        
+        # Filtrar por fecha inicial
         if d1:
-            mask &= ((df["fecha_cl"] >= d1) | (df["fecha_cl"].isna()))
+            # Comparar date con date
+            mask &= ((df_work["fecha_cl"] >= d1) | (df_work["fecha_cl"].isna()))
         
+        # Filtrar por fecha final
         if d2:
-            mask &= ((df["fecha_cl"] <= d2) | (df["fecha_cl"].isna()))
+            # Comparar date con date
+            mask &= ((df_work["fecha_cl"] <= d2) | (df_work["fecha_cl"].isna()))
         
+        # Aplicar filtro al DataFrame original
         filtered = df.loc[mask].copy()
         
         removed = len(df) - len(filtered)
@@ -791,7 +804,8 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
                     "removed": removed,
                     "d1": str(d1),
                     "d2": str(d2),
-                    "null_dates": df["fecha_cl"].isna().sum()
+                    "null_dates": df["fecha_cl"].isna().sum(),
+                    "fecha_cl_dtype": str(df["fecha_cl"].dtype)
                 }
             )
         
