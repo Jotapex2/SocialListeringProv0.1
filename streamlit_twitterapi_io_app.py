@@ -748,7 +748,7 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
 def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
     """
     Filtra DataFrame por ventana de fechas.
-    Versión ultra-robusta que convierte todo a strings para comparación.
+    Versión robusta con comparación por strings ISO.
     """
     if df is None or df.empty:
         return df
@@ -767,32 +767,34 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
         d2 = current
     
     try:
-        # Crear columna temporal con fechas como strings YYYY-MM-DD
-        df_work = df.copy()
-        
         # Convertir fecha_cl a string de forma segura
         def safe_date_str(x):
+            """Convierte cualquier tipo de fecha a string ISO"""
             if pd.isna(x):
                 return None
             try:
                 if isinstance(x, str):
-                    return x[:10]  # Ya es string, tomar primeros 10 chars
+                    return x[:10]  # Ya es string, tomar YYYY-MM-DD
                 elif isinstance(x, date):
                     return x.isoformat()
                 elif isinstance(x, pd.Timestamp):
                     return x.date().isoformat()
+                elif hasattr(x, 'strftime'):  # datetime64
+                    return pd.to_datetime(x).date().isoformat()
                 else:
                     return str(x)[:10]
             except:
                 return None
         
+        # Crear columna temporal de trabajo
+        df_work = df.copy()
         df_work["_fecha_str"] = df_work["fecha_cl"].apply(safe_date_str)
         
-        # Convertir fechas de búsqueda a string
+        # Convertir fechas de filtro a string ISO
         d1_str = d1.isoformat() if d1 else None
         d2_str = d2.isoformat() if d2 else None
         
-        # Crear máscara
+        # Crear máscara de filtrado
         mask = pd.Series(True, index=df_work.index)
         
         if d1_str:
@@ -801,7 +803,7 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
         if d2_str:
             mask &= ((df_work["_fecha_str"] <= d2_str) | (df_work["_fecha_str"].isna()))
         
-        # Aplicar filtro
+        # Aplicar filtro al DataFrame original
         filtered = df.loc[mask].copy()
         
         removed = len(df) - len(filtered)
@@ -818,31 +820,22 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
                     "d1": d1_str,
                     "d2": d2_str,
                     "null_dates": df_work["_fecha_str"].isna().sum(),
-                    "fecha_cl_type": str(type(df["fecha_cl"].iloc[0]) if len(df) > 0 else "empty"),
-                    "sample_dates": df_work["_fecha_str"].head(3).tolist()
+                    "fecha_cl_dtype": str(df["fecha_cl"].dtype),
+                    "sample_dates": df_work["_fecha_str"].dropna().head(3).tolist()
                 }
             )
         
         return filtered
         
     except Exception as e:
-        log_message(f"Error en filtrado: {e}", "error", {"traceback": traceback.format_exc()})
+        log_message(
+            f"Error en filtrado: {e}", 
+            "error", 
+            {"traceback": traceback.format_exc()}
+        )
         st.warning(f"⚠️ Error al filtrar fechas: {e}. Mostrando todos los datos.")
         return df
 
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    bio = io.BytesIO()
-    df_exp = df.copy()
-    for c in df_exp.columns:
-        if is_datetime64tz_dtype(df_exp[c]): df_exp[c] = df_exp[c].dt.tz_localize(None)
-    with pd.ExcelWriter(bio, engine="xlsxwriter") as xw: df_exp.to_excel(xw, sheet_name="posts", index=False)
-    bio.seek(0)
-    return bio.read()
-
-
-def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8-sig")
 
 
 # ============================================================================
