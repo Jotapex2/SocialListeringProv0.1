@@ -253,51 +253,73 @@ def _safe_excel_str(x: Any) -> str:
     return s
 
 def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Make a DataFrame safe for Excel:
-    - tz-aware datetimes -> naive
-    - dict/list/objects -> strings
-    - remove control chars
-    - truncate cell strings to Excel limit
-    """
-    if df is None:
-        return pd.DataFrame()
-    if df.empty:
-        return df.copy()
-
+    '''Make a DataFrame safe for Excel.'''
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+    
     out = df.copy()
-
-    # 1) Handle datetime columns
+    
+    # 1) Convertir datetime timezone-aware a naive
     for col in out.columns:
         try:
             if is_datetime64tz_dtype(out[col]):
-                # convert to naive
-                out[col] = pd.to_datetime(out[col], utc=True, errors="coerce").dt.tz_localize(None)
+                out[col] = pd.to_datetime(out[col], utc=True, errors='coerce').dt.tz_localize(None)
             elif is_datetime64_any_dtype(out[col]):
-                # ensure it's not weird object datetimes
-                out[col] = pd.to_datetime(out[col], errors="coerce")
+                out[col] = pd.to_datetime(out[col], errors='coerce')
         except Exception:
-            # if conversion fails, fall back to safe strings
-            out[col] = out[col].apply(_safe_excel_str)
-
-    # 2) Handle object columns robustly (dict/list/bytes/etc)
+            out[col] = out[col].apply(safe_excel_str)
+    
+    # 2) Limpiar columnas object
     for col in out.columns:
-        if out[col].dtype == "object":
-            out[col] = out[col].apply(_safe_excel_str)
-
-    # 3) Ensure column names safe
+        if out[col].dtype == 'object':
+            out[col] = out[col].apply(safe_excel_str)
+    
+    # 3) Nombres de columnas seguros
     out.columns = [str(c)[:255] for c in out.columns]
-
+    
+    # 4) Verificación final
+    for col in out.columns:
+        if out[col].dtype == 'object':
+            out[col] = out[col].fillna("").astype(str)
+    
     return out
 
+
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (robusto)."""
-    output = io.BytesIO()
+    '''Convierte DataFrame a bytes de Excel robusto.'''
+    if df is None or df.empty:
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
+        output.seek(0)
+        return output.getvalue()
+    
+    # CRÍTICO: Sanitizar ANTES de exportar
     safe_df = sanitize_df_for_excel(df)
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    output.seek(0)
-    return output.getvalue()
+    
+    # Segunda capa: forzar TODO a string si es object
+    for col in safe_df.columns:
+        if safe_df[col].dtype == 'object':
+            safe_df[col] = safe_df[col].apply(lambda x: str(x) if pd.notna(x) else "")
+            safe_df[col] = safe_df[col].apply(lambda x: x[:32760] if len(x) > 32760 else x)
+    
+    output = io.BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            safe_df.to_excel(writer, index=False, sheet_name='Datos')
+        output.seek(0)
+        return output.getvalue()
+    except Exception as e:
+        log_message(f"Error Excel export, usando fallback: {e}", "warning")
+        output = io.BytesIO()
+        fallback_df = safe_df.copy()
+        for col in fallback_df.columns:
+            fallback_df[col] = fallback_df[col].astype(str).str[:32760]
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            fallback_df.to_excel(writer, index=False, sheet_name='Datos')
+        output.seek(0)
+        return output.getvalue()
+
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """Convierte DataFrame a bytes CSV (robusto)."""
@@ -1257,7 +1279,7 @@ if df is not None and not df.empty:
                 st.pyplot(fig)
                 current_figures["evolucion"] = fig_to_bytes(fig)
                 plt.close(fig)
-data=df_to_excel_bytes(sanitize_df_for_excel(crisis_data["crisis_posts"])),
+    data=df_to_excel_bytes(sanitize_df_for_excel(crisis_data["crisis_posts"])),
 
     with tabs[1]:
         if "sentiment" in df.columns:
