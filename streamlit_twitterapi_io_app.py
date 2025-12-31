@@ -286,7 +286,7 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (robusto)."""
+    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
     if df is None or df.empty:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -294,38 +294,35 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         output.seek(0)
         return output.getvalue()
     
-    # Paso 1: Sanitizar estructura básica
+    # 1. Intentar sanitización estándar
     safe_df = sanitize_df_for_excel(df)
-    
-    # Paso 2: FORZAR conversión agresiva a strings en TODAS las columnas object
-    for col in safe_df.columns:
-        try:
-            if safe_df[col].dtype == 'object':
-                # Convertir TODO a string, sin excepciones
-                safe_df[col] = safe_df[col].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
-                # Truncar strings largos
-                safe_df[col] = safe_df[col].str[:32760]
-        except Exception as e:
-            log_message(f"Error convirtiendo columna {col}: {e}", "warning")
-            # Último recurso: reemplazar toda la columna con strings vacíos
-            safe_df[col] = ""
     
     output = io.BytesIO()
     try:
+        # Intento normal
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             safe_df.to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
     except Exception as e:
-        log_message(f"Error final en Excel export: {e}", "error", {"traceback": traceback.format_exc()})
-        # Fallback ultra-seguro: convertir TODO el DataFrame a strings
-        output = io.BytesIO()
-        fallback_df = pd.DataFrame(safe_df.astype(str))
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
+        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback (texto plano).", "warning")
+        
+        # 2. MODO FALLBACK: Convertir TODO a String
+        # Esto soluciona el ValueError de fechas con zona horaria o tipos mixtos
+        try:
+            output = io.BytesIO()
+            fallback_df = safe_df.astype(str) # Forzar todo a texto
+            
+            # Limpiar caracteres ilegales para Excel
+            for col in fallback_df.columns:
+                fallback_df[col] = fallback_df[col].apply(lambda x: _safe_excel_str(x))
 
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
+        except Exception as e2:
+             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
+             return b"" # Retornar vacío si todo falla
+
+    output.seek(0)
+    return output.getvalue()
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """Convierte DataFrame a bytes CSV (robusto)."""
