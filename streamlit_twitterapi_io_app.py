@@ -1248,7 +1248,7 @@ if df is not None and not df.empty:
             st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
             st.download_button(
                 label="📥 Descargar Posts de Crisis (Excel)",
-                data=df_to_excel_bytes(crisis_data["crisis_posts"]),
+                data=dftoexcelbytes(crisis_data["crisis_posts"]),
                 file_name="reporte_crisis.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="btn_download_crisis"
