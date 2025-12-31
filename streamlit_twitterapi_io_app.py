@@ -230,15 +230,6 @@ if "logged_in" not in st.session_state:
 if not st.session_state['logged_in']:
     login()
     st.stop()
-# ============================================================================
-# EXPORTS + EMAIL HELPERS (FIXED)
-# ============================================================================
-
-def fig_to_bytes(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    return buf.read()
 
 # ============================================================================
 # EXPORTS + EMAIL HELPERS (VERSIÓN FINAL RENOMBRADA)
@@ -346,7 +337,6 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
     output.seek(0)
     return output.getvalue()
-
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
