@@ -263,6 +263,8 @@ def df_to_excel_bytes(df):
     output.seek(0)
     return output.getvalue()
 
+def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
 
 
 @measure_time("send_email_report")
