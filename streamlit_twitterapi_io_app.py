@@ -286,7 +286,7 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    '''Convierte DataFrame a bytes de Excel robusto.'''
+    """Convierte DataFrame a bytes de Excel (robusto)."""
     if df is None or df.empty:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -294,14 +294,21 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         output.seek(0)
         return output.getvalue()
     
-    # CRÍTICO: Sanitizar ANTES de exportar
+    # Paso 1: Sanitizar estructura básica
     safe_df = sanitize_df_for_excel(df)
     
-    # Segunda capa: forzar TODO a string si es object
+    # Paso 2: FORZAR conversión agresiva a strings en TODAS las columnas object
     for col in safe_df.columns:
-        if safe_df[col].dtype == 'object':
-            safe_df[col] = safe_df[col].apply(lambda x: str(x) if pd.notna(x) else "")
-            safe_df[col] = safe_df[col].apply(lambda x: x[:32760] if len(x) > 32760 else x)
+        try:
+            if safe_df[col].dtype == 'object':
+                # Convertir TODO a string, sin excepciones
+                safe_df[col] = safe_df[col].astype(str).replace({'nan': '', 'None': '', '<NA>': ''})
+                # Truncar strings largos
+                safe_df[col] = safe_df[col].str[:32760]
+        except Exception as e:
+            log_message(f"Error convirtiendo columna {col}: {e}", "warning")
+            # Último recurso: reemplazar toda la columna con strings vacíos
+            safe_df[col] = ""
     
     output = io.BytesIO()
     try:
@@ -310,11 +317,10 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         output.seek(0)
         return output.getvalue()
     except Exception as e:
-        log_message(f"Error Excel export, usando fallback: {e}", "warning")
+        log_message(f"Error final en Excel export: {e}", "error", {"traceback": traceback.format_exc()})
+        # Fallback ultra-seguro: convertir TODO el DataFrame a strings
         output = io.BytesIO()
-        fallback_df = safe_df.copy()
-        for col in fallback_df.columns:
-            fallback_df[col] = fallback_df[col].astype(str).str[:32760]
+        fallback_df = pd.DataFrame(safe_df.astype(str))
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             fallback_df.to_excel(writer, index=False, sheet_name='Datos')
         output.seek(0)
