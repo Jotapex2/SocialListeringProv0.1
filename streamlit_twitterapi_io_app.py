@@ -241,35 +241,40 @@ def fig_to_bytes(fig) -> bytes:
     return buf.read()
 
 # ============================================================================
-# EXPORTS HELPERS (CORREGIDO)
+# EXPORTS + EMAIL HELPERS (BLOQUE CORREGIDO COMPLETO)
 # ============================================================================
+
+def fig_to_bytes(fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight')
+    buf.seek(0)
+    return buf.read()
 
 # Excel constraints
 _EXCEL_MAX_CELL_CHARS = 32767
+# Remove control chars Excel doesn't like (except \t \n \r)
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 def _safe_excel_str(x: Any) -> str:
-    """Helper para limpiar strings para Excel."""
+    """Función auxiliar para limpiar strings para Excel (con guion bajo al inicio)."""
     if x is None or pd.isna(x):
         return ""
-    
-    # Convertir dict/list a json
+    # Convert dict/list to json
     if isinstance(x, (dict, list, tuple, set)):
         try:
             return json.dumps(x, ensure_ascii=False, default=str)
         except Exception:
             return str(x)
-            
-    # Convertir datetimes a string simple
+    # Convert tz-aware datetime objects to naive string
     if isinstance(x, (datetime, pd.Timestamp)):
         try:
             ts = pd.to_datetime(x, utc=True, errors="coerce")
             if pd.notna(ts):
-                return ts.tz_localize(None).isoformat(sep=" ")
+                ts = ts.tz_localize(None)
+                return ts.isoformat(sep=" ")
         except Exception:
             return str(x)
-            
-    # Limpieza de strings
+    
     s = str(x)
     s = _CTRL_CHARS_RE.sub(" ", s)
     if len(s) > _EXCEL_MAX_CELL_CHARS:
@@ -277,13 +282,13 @@ def _safe_excel_str(x: Any) -> str:
     return s
 
 def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    '''Prepara el DataFrame para evitar errores al exportar.'''
+    '''Make a DataFrame safe for Excel.'''
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
     
     out = df.copy()
     
-    # 1) Manejo robusto de fechas
+    # 1) Convertir datetime timezone-aware a naive
     for col in out.columns:
         try:
             if is_datetime64tz_dtype(out[col]):
@@ -291,19 +296,54 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
             elif is_datetime64_any_dtype(out[col]):
                 out[col] = pd.to_datetime(out[col], errors='coerce')
         except Exception:
-            # Si falla la conversión de fecha, usar el helper
+            # Si falla la fecha, usar el limpiador de strings
             out[col] = out[col].apply(_safe_excel_str)
     
-    # 2) Limpiar columnas de texto/objetos
+    # 2) Limpiar columnas object usando la función CORRECTA (con guion bajo)
     for col in out.columns:
         if out[col].dtype == 'object':
-            # AQUI ESTABA EL ERROR: faltaba el guion bajo en _safe_excel_str
             out[col] = out[col].apply(_safe_excel_str)
     
     # 3) Nombres de columnas seguros
     out.columns = [str(c)[:255] for c in out.columns]
     
     return out
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
+    if df is None or df.empty:
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
+        output.seek(0)
+        return output.getvalue()
+    
+    # 1. Intentar sanitización estándar
+    safe_df = sanitize_df_for_excel(df)
+    
+    output = io.BytesIO()
+    try:
+        # Intento normal
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            safe_df.to_excel(writer, index=False, sheet_name='Datos')
+    except Exception as e:
+        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback.", "warning")
+        
+        # 2. MODO FALLBACK: Convertir TODO a String si falla el anterior
+        try:
+            output = io.BytesIO()
+            fallback_df = safe_df.astype(str) # Forzar todo a texto
+            for col in fallback_df.columns:
+                fallback_df[col] = fallback_df[col].apply(_safe_excel_str)
+
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
+        except Exception as e2:
+             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
+             return b""
+
+    output.seek(0)
+    return output.getvalue()
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
