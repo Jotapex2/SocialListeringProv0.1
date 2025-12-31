@@ -241,7 +241,7 @@ def fig_to_bytes(fig) -> bytes:
     return buf.read()
 
 # ============================================================================
-# EXPORTS + EMAIL HELPERS (BLOQUE CORREGIDO COMPLETO)
+# EXPORTS + EMAIL HELPERS (VERSIÓN FINAL RENOMBRADA)
 # ============================================================================
 
 def fig_to_bytes(fig) -> bytes:
@@ -250,31 +250,33 @@ def fig_to_bytes(fig) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# Excel constraints
+# Constraints y Regex
 _EXCEL_MAX_CELL_CHARS = 32767
-# Remove control chars Excel doesn't like (except \t \n \r)
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-def _safe_excel_str(x: Any) -> str:
-    """Función auxiliar para limpiar strings para Excel (con guion bajo al inicio)."""
+# --- FUNCIÓN RENOMBRADA PARA EVITAR EL NAME ERROR ---
+def limpiar_celda_excel(x: Any) -> str:
+    """Limpia un valor individual para que Excel no falle."""
     if x is None or pd.isna(x):
         return ""
-    # Convert dict/list to json
+    
+    # Si es diccionario o lista, a JSON string
     if isinstance(x, (dict, list, tuple, set)):
         try:
             return json.dumps(x, ensure_ascii=False, default=str)
         except Exception:
             return str(x)
-    # Convert tz-aware datetime objects to naive string
+            
+    # Si es fecha, quitar zona horaria
     if isinstance(x, (datetime, pd.Timestamp)):
         try:
             ts = pd.to_datetime(x, utc=True, errors="coerce")
             if pd.notna(ts):
-                ts = ts.tz_localize(None)
-                return ts.isoformat(sep=" ")
+                return ts.tz_localize(None).isoformat(sep=" ")
         except Exception:
             return str(x)
-    
+            
+    # Limpieza de caracteres prohibidos en texto
     s = str(x)
     s = _CTRL_CHARS_RE.sub(" ", s)
     if len(s) > _EXCEL_MAX_CELL_CHARS:
@@ -282,13 +284,13 @@ def _safe_excel_str(x: Any) -> str:
     return s
 
 def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    '''Make a DataFrame safe for Excel.'''
+    '''Prepara todo el DataFrame usando la nueva función de limpieza.'''
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
     
     out = df.copy()
     
-    # 1) Convertir datetime timezone-aware a naive
+    # 1. Intentar convertir fechas primero
     for col in out.columns:
         try:
             if is_datetime64tz_dtype(out[col]):
@@ -296,18 +298,55 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
             elif is_datetime64_any_dtype(out[col]):
                 out[col] = pd.to_datetime(out[col], errors='coerce')
         except Exception:
-            # Si falla la fecha, usar el limpiador de strings
-            out[col] = out[col].apply(_safe_excel_str)
+            # Si falla, convertir a texto limpio
+            out[col] = out[col].apply(limpiar_celda_excel)
     
-    # 2) Limpiar columnas object usando la función CORRECTA (con guion bajo)
+    # 2. Aplicar limpieza a todas las columnas de texto (Object)
+    # AQUI OCURRÍA EL ERROR ANTES. AHORA USA EL NOMBRE NUEVO.
     for col in out.columns:
         if out[col].dtype == 'object':
-            out[col] = out[col].apply(_safe_excel_str)
+            out[col] = out[col].apply(limpiar_celda_excel)
     
-    # 3) Nombres de columnas seguros
+    # 3. Nombres de columnas seguros
     out.columns = [str(c)[:255] for c in out.columns]
     
     return out
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Genera el Excel en memoria."""
+    if df is None or df.empty:
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
+        output.seek(0)
+        return output.getvalue()
+    
+    # Paso 1: Sanitización normal
+    safe_df = sanitize_df_for_excel(df)
+    
+    output = io.BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            safe_df.to_excel(writer, index=False, sheet_name='Datos')
+    except Exception as e:
+        log_message(f"⚠️ Falló Excel estándar: {e}. Usando modo texto plano.", "warning")
+        
+        # Paso 2: Fallback de emergencia (todo a string usando la función nueva)
+        try:
+            output = io.BytesIO()
+            fallback_df = safe_df.astype(str)
+            for col in fallback_df.columns:
+                fallback_df[col] = fallback_df[col].apply(limpiar_celda_excel)
+
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
+        except Exception as e2:
+             log_message(f"❌ Error fatal en Excel: {e2}", "error")
+             return b""
+
+    output.seek(0)
+    return output.getvalue()
+
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
