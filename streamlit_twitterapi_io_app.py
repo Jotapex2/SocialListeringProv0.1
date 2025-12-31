@@ -255,6 +255,14 @@ def fig_to_bytes(fig) -> bytes:
     fig.savefig(buf, format="png", bbox_inches='tight')
     buf.seek(0)
     return buf.read()
+def df_to_excel_bytes(df):
+    """Convierte DataFrame a bytes de Excel"""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Datos')
+    output.seek(0)
+    return output.getvalue()
+
 
 
 @measure_time("send_email_report")
@@ -1248,7 +1256,7 @@ if df is not None and not df.empty:
             st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
             st.download_button(
                 label="📥 Descargar Posts de Crisis (Excel)",
-                data=dftoexcelbytes(crisis_data["crisis_posts"]),
+                data=df_to_excel_bytes(crisis_data["crisis_posts"]),
                 file_name="reporte_crisis.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="btn_download_crisis"
