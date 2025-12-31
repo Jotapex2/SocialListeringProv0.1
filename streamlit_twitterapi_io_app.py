@@ -189,29 +189,47 @@ def render_debug_panel():
             st.info("No hay respuestas de API registradas")
 
 # ============================================================================
-# LOGIN SEGURO
+# LOGIN SEGURO (CORREGIDO)
 # ============================================================================
+from dotenv import load_dotenv
 
-ADMIN_USER = env("ADMIN_USER") or "admin"
-ADMIN_PASS = env("ADMIN_PASS") or "admin123"
+# 1. Forzar recarga del .env para asegurar que lea cambios recientes
+load_dotenv(override=True)
 
 def login():
     st.title("🔐 Acceso Seguro")
+    
+    # 2. Leer variables DENTRO de la función para garantizar que están frescas
+    # .strip() evita errores si dejaste un espacio al final en el .env
+    env_user = (os.getenv("ADMIN_USER") or "admin").strip()
+    env_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        user = st.text_input("Usuario")
-        pwd = st.text_input("Contraseña", type="password")
-        if st.button("Iniciar Sesión", use_container_width=True):
-            if user == ADMIN_USER and pwd == ADMIN_PASS:
-                st.session_state['logged_in'] = True
-                st.rerun()
-            else:
-                st.error("Credenciales incorrectas.")
+        # 3. Usar st.form evita recargas extrañas al escribir
+        with st.form("login_form"):
+            user = st.text_input("Usuario")
+            pwd = st.text_input("Contraseña", type="password")
+            submit = st.form_submit_button("Iniciar Sesión", use_container_width=True)
 
-if "logged_in" not in st.session_state or not st.session_state['logged_in']:
+            if submit:
+                # Validación directa
+                if user.strip() == env_user and pwd.strip() == env_pass:
+                    st.session_state['logged_in'] = True
+                    st.rerun()
+                else:
+                    st.error("Credenciales incorrectas.")
+                    # Debug (opcional, borra esto en producción):
+                    if st.session_state.get("debug_mode"):
+                        st.warning(f"Esperaba: User='{env_user}' / Pass='{env_pass[:3]}***'")
+
+# Inicialización del estado
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+
+if not st.session_state['logged_in']:
     login()
     st.stop()
-
 # ============================================================================
 # EXPORTS + EMAIL HELPERS (FIXED)
 # ============================================================================
