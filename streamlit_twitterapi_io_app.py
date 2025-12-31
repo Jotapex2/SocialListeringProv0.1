@@ -1285,7 +1285,6 @@ if df is not None and not df.empty:
                 st.pyplot(fig)
                 current_figures["evolucion"] = fig_to_bytes(fig)
                 plt.close(fig)
-    data=df_to_excel_bytes(sanitize_df_for_excel(crisis_data["crisis_posts"])),
 
     with tabs[1]:
         if "sentiment" in df.columns:
