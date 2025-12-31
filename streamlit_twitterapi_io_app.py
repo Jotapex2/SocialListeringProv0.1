@@ -240,30 +240,36 @@ def fig_to_bytes(fig) -> bytes:
     buf.seek(0)
     return buf.read()
 
+# ============================================================================
+# EXPORTS HELPERS (CORREGIDO)
+# ============================================================================
+
 # Excel constraints
 _EXCEL_MAX_CELL_CHARS = 32767
-# Remove control chars Excel doesn't like (except \t \n \r)
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 def _safe_excel_str(x: Any) -> str:
-    """Convert any value to an Excel-safe string."""
-    if x is None or (isinstance(x, float) and pd.isna(x)) or pd.isna(x):
+    """Helper para limpiar strings para Excel."""
+    if x is None or pd.isna(x):
         return ""
-    # Convert dict/list to json
+    
+    # Convertir dict/list a json
     if isinstance(x, (dict, list, tuple, set)):
         try:
-            x = json.dumps(x, ensure_ascii=False, default=str)
+            return json.dumps(x, ensure_ascii=False, default=str)
         except Exception:
-            x = str(x)
-    # Convert tz-aware datetime objects to naive string
+            return str(x)
+            
+    # Convertir datetimes a string simple
     if isinstance(x, (datetime, pd.Timestamp)):
         try:
             ts = pd.to_datetime(x, utc=True, errors="coerce")
             if pd.notna(ts):
-                ts = ts.tz_localize(None)
-                return ts.isoformat(sep=" ")
+                return ts.tz_localize(None).isoformat(sep=" ")
         except Exception:
             return str(x)
+            
+    # Limpieza de strings
     s = str(x)
     s = _CTRL_CHARS_RE.sub(" ", s)
     if len(s) > _EXCEL_MAX_CELL_CHARS:
@@ -271,13 +277,13 @@ def _safe_excel_str(x: Any) -> str:
     return s
 
 def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    '''Make a DataFrame safe for Excel.'''
+    '''Prepara el DataFrame para evitar errores al exportar.'''
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
     
     out = df.copy()
     
-    # 1) Convertir datetime timezone-aware a naive
+    # 1) Manejo robusto de fechas
     for col in out.columns:
         try:
             if is_datetime64tz_dtype(out[col]):
@@ -285,20 +291,17 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
             elif is_datetime64_any_dtype(out[col]):
                 out[col] = pd.to_datetime(out[col], errors='coerce')
         except Exception:
-            out[col] = out[col].apply(safe_excel_str)
+            # Si falla la conversión de fecha, usar el helper
+            out[col] = out[col].apply(_safe_excel_str)
     
-    # 2) Limpiar columnas object
+    # 2) Limpiar columnas de texto/objetos
     for col in out.columns:
         if out[col].dtype == 'object':
-            out[col] = out[col].apply(safe_excel_str)
+            # AQUI ESTABA EL ERROR: faltaba el guion bajo en _safe_excel_str
+            out[col] = out[col].apply(_safe_excel_str)
     
     # 3) Nombres de columnas seguros
     out.columns = [str(c)[:255] for c in out.columns]
-    
-    # 4) Verificación final
-    for col in out.columns:
-        if out[col].dtype == 'object':
-            out[col] = out[col].fillna("").astype(str)
     
     return out
 
