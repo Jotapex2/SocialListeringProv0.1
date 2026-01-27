@@ -1,1012 +1,143 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "JP" Persona - V6.8.1 (Excel-safe export fix + Missing CSV + Robust Sanitizer)
-# UI: Español | Feat: Stealth Credentials + Email Reporting + AI Analyst (Specific Citations) + Debug Tools
+# Versión optimizada con mejor manejo de errores y procesamiento robusto
+# Mejoras: retry logic, logging, validaciones, performance, USD VALUATION
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
-import asyncio
-import httpx
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email.mime.image import MIMEImage
-from email import encoders
 from wordcloud import WordCloud, STOPWORDS
 from unidecode import unidecode
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
-from pandas.api.types import is_datetime64tz_dtype, is_datetime64_any_dtype
-from typing import Optional, List, Dict, Any
-from collections import Counter
+from pandas.api.types import is_datetime64tz_dtype
+from urllib.parse import urlparse
+from typing import Optional, List, Dict, Any, Callable
 import logging
-import traceback
+import functools
 
 # ============================================================================
-# CONFIGURACIÓN INICIAL & LOGGING
+# CONFIGURACIÓN INICIAL
 # ============================================================================
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "JP Release v6.8.1 - Excel-safe export fix + CSV bytes + DEBUG MODE"
+BUILD_TAG = "RRSS-Pro v3.1 - USD Valuation + Optimized Apify + Enhanced Error Handling. Creado por Juan Pablo González Urriola"
+
 st.caption(f"Build: {BUILD_TAG}")
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+# Configuración de logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Constantes
 SCL_TZ = pytz.timezone("America/Santiago")
 API_URL_X = "https://api.twitterapi.io/twitter/tweet/advanced_search"
-ASYNC_POLL_INTERVAL = 3
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+DEFAULT_TIMEOUT = 120
+ASYNC_MAX_WAIT = 360
+ASYNC_POLL_INTERVAL = 8
 
 load_dotenv()
 
 # ============================================================================
-# SESSION STATE & UTILS (ENHANCED WITH DEBUG)
+# SESSION STATE
 # ============================================================================
 
-default_state = {
-    "df": None,
-    "params": {},
-    "query_str": None,
-    "logs": [],
-    "report_figures": {},
-    "ai_summary": None,
-    "debug_mode": False,
-    "debug_logs": [],
-    "api_responses": {},
-    "execution_times": {}
-}
-for k, v in default_state.items():
+for k, v in {"df": None, "params": {}, "query_str": None, "logs": [], "debug_mode": False}.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 def env(name: str) -> Optional[str]:
+    """Obtiene variable de entorno desde secrets o .env"""
     try:
-        return st.secrets.get(name) or os.getenv(name)
+        v = st.secrets.get(name)
     except Exception:
-        return os.getenv(name)
+        v = None
+    return v or os.getenv(name)
 
-def log_message(msg: str, level: str = "info", debug_data: Optional[Dict] = None):
-    timestamp = datetime.now(SCL_TZ).strftime("%H:%M:%S.%f")[:-3]
+def log_message(msg: str, level: str = "info", extra_data: Dict = None):
+    """Registra mensaje en logs de sesión"""
+    timestamp = datetime.now(SCL_TZ).strftime("%H:%M:%S")
     log_entry = f"[{timestamp}] {msg}"
+    if extra_data:
+        log_entry += f" | {json.dumps(extra_data)}"
     st.session_state["logs"].append(log_entry)
-
-    if st.session_state.get("debug_mode", False):
-        debug_entry = {
-            "timestamp": timestamp,
-            "level": level.upper(),
-            "message": msg,
-            "data": debug_data or {}
-        }
-        st.session_state["debug_logs"].append(debug_entry)
-
+    
     if level == "error":
         logger.error(msg)
-        if debug_data:
-            logger.debug(f"Error data: {json.dumps(debug_data, indent=2, default=str)}")
     elif level == "warning":
         logger.warning(msg)
-    elif level == "debug":
-        logger.debug(msg)
     else:
         logger.info(msg)
 
 def measure_time(func_name: str):
+    """Decorador para medir tiempo de ejecución"""
     def decorator(func):
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             start = time.time()
-            try:
-                result = func(*args, **kwargs)
-                elapsed = time.time() - start
-                if st.session_state.get("debug_mode"):
-                    st.session_state["execution_times"][func_name] = elapsed
-                    log_message(f"⏱️ {func_name} ejecutado en {elapsed:.2f}s", "debug")
-                return result
-            except Exception as e:
-                elapsed = time.time() - start
-                log_message(
-                    f"❌ {func_name} falló después de {elapsed:.2f}s: {str(e)}",
-                    "error",
-                    {"exception": str(e), "traceback": traceback.format_exc()}
-                )
-                raise
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start
+            log_message(f"⏱️ {func_name} completado en {elapsed:.2f}s", "debug")
+            return result
         return wrapper
     return decorator
 
 # ============================================================================
-# DEBUG PANEL
+# EXPORT HELPERS
 # ============================================================================
 
-def render_debug_panel():
-    if not st.session_state.get("debug_mode"):
-        return
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🐛 Debug Tools")
-
-    debug_tabs = st.sidebar.tabs(["📋 Logs", "⏱️ Tiempos", "🔍 Datos", "📡 APIs"])
-
-    with debug_tabs[0]:
-        if st.button("🗑️ Limpiar Logs", key="clear_logs"):
-            st.session_state["debug_logs"] = []
-            st.session_state["logs"] = []
-
-        log_count = len(st.session_state.get("debug_logs", []))
-        st.caption(f"Total: {log_count} entradas")
-
-        if st.session_state.get("debug_logs"):
-            log_df = pd.DataFrame(st.session_state["debug_logs"])
-            st.dataframe(log_df.tail(20), use_container_width=True, height=200)
-            log_json = json.dumps(st.session_state["debug_logs"], indent=2, default=str)
-            st.download_button(
-                "💾 Exportar Logs JSON",
-                log_json,
-                "debug_logs.json",
-                "application/json",
-                key="download_logs"
-            )
-
-    with debug_tabs[1]:
-        times = st.session_state.get("execution_times", {})
-        if times:
-            times_df = pd.DataFrame(
-                [{"Función": k, "Tiempo (s)": f"{v:.3f}"} for k, v in sorted(times.items(), key=lambda x: x[1], reverse=True)]
-            )
-            st.dataframe(times_df, use_container_width=True, height=200)
-            total_time = sum(times.values())
-            st.metric("Tiempo Total", f"{total_time:.2f}s")
-        else:
-            st.info("No hay tiempos registrados")
-
-    with debug_tabs[2]:
-        df = st.session_state.get("df")
-        if df is not None and not df.empty:
-            st.write(f"**Shape:** {df.shape}")
-            st.write(f"**Columns:** {', '.join(df.columns.tolist())}")
-            st.write(f"**Memoria:** {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-
-            if st.checkbox("Ver primeras filas", key="show_head"):
-                st.dataframe(df.head(10))
-
-            if st.checkbox("Ver info de columnas", key="show_info"):
-                buffer = io.StringIO()
-                df.info(buf=buffer)
-                st.text(buffer.getvalue())
-        else:
-            st.info("No hay DataFrame cargado")
-
-    with debug_tabs[3]:
-        responses = st.session_state.get("api_responses", {})
-        if responses:
-            selected_api = st.selectbox("API", list(responses.keys()))
-            if selected_api:
-                st.json(responses[selected_api])
-        else:
-            st.info("No hay respuestas de API registradas")
-
-# ============================================================================
-# LOGIN SEGURO (CORREGIDO)
-# ============================================================================
-from dotenv import load_dotenv
-
-# 1. Forzar recarga del .env para asegurar que lea cambios recientes
-load_dotenv(override=True)
-
-def login():
-    st.title("🔐 Acceso Seguro")
-    
-    # 2. Leer variables DENTRO de la función para garantizar que están frescas
-    # .strip() evita errores si dejaste un espacio al final en el .env
-    env_user = (os.getenv("ADMIN_USER") or "admin").strip()
-    env_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        # 3. Usar st.form evita recargas extrañas al escribir
-        with st.form("login_form"):
-            user = st.text_input("Usuario")
-            pwd = st.text_input("Contraseña", type="password")
-            submit = st.form_submit_button("Iniciar Sesión", use_container_width=True)
-
-            if submit:
-                # Validación directa
-                if user.strip() == env_user and pwd.strip() == env_pass:
-                    st.session_state['logged_in'] = True
-                    st.rerun()
-                else:
-                    st.error("Credenciales incorrectas.")
-                    # Debug (opcional, borra esto en producción):
-                    if st.session_state.get("debug_mode"):
-                        st.warning(f"Esperaba: User='{env_user}' / Pass='{env_pass[:3]}***'")
-
-# Inicialización del estado
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-
-if not st.session_state['logged_in']:
-    login()
-    st.stop()
-
-# ============================================================================
-# EXPORTS + EMAIL HELPERS (VERSIÓN FINAL RENOMBRADA)
-# ============================================================================
-
-def fig_to_bytes(fig) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    return buf.read()
-
-# Constraints y Regex
-_EXCEL_MAX_CELL_CHARS = 32767
-_CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-# --- FUNCIÓN RENOMBRADA PARA EVITAR EL NAME ERROR ---
-def limpiar_celda_excel(x: Any) -> str:
-    """Limpia un valor individual para que Excel no falle."""
-    if x is None or pd.isna(x):
-        return ""
-    
-    # Si es diccionario o lista, a JSON string
-    if isinstance(x, (dict, list, tuple, set)):
-        try:
-            return json.dumps(x, ensure_ascii=False, default=str)
-        except Exception:
-            return str(x)
-            
-    # Si es fecha, quitar zona horaria
-    if isinstance(x, (datetime, pd.Timestamp)):
-        try:
-            ts = pd.to_datetime(x, utc=True, errors="coerce")
-            if pd.notna(ts):
-                return ts.tz_localize(None).isoformat(sep=" ")
-        except Exception:
-            return str(x)
-            
-    # Limpieza de caracteres prohibidos en texto
-    s = str(x)
-    s = _CTRL_CHARS_RE.sub(" ", s)
-    if len(s) > _EXCEL_MAX_CELL_CHARS:
-        s = s[:_EXCEL_MAX_CELL_CHARS - 3] + "..."
-    return s
-
-def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    '''Prepara todo el DataFrame usando la nueva función de limpieza.'''
-    if df is None or df.empty:
-        return pd.DataFrame() if df is None else df.copy()
-    
-    out = df.copy()
-    
-    # 1. Intentar convertir fechas primero
-    for col in out.columns:
-        try:
-            if is_datetime64tz_dtype(out[col]):
-                out[col] = pd.to_datetime(out[col], utc=True, errors='coerce').dt.tz_localize(None)
-            elif is_datetime64_any_dtype(out[col]):
-                out[col] = pd.to_datetime(out[col], errors='coerce')
-        except Exception:
-            # Si falla, convertir a texto limpio
-            out[col] = out[col].apply(limpiar_celda_excel)
-    
-    # 2. Aplicar limpieza a todas las columnas de texto (Object)
-    # AQUI OCURRÍA EL ERROR ANTES. AHORA USA EL NOMBRE NUEVO.
-    for col in out.columns:
-        if out[col].dtype == 'object':
-            out[col] = out[col].apply(limpiar_celda_excel)
-    
-    # 3. Nombres de columnas seguros
-    out.columns = [str(c)[:255] for c in out.columns]
-    
-    return out
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Genera el Excel en memoria."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
-    
-    # Paso 1: Sanitización normal
-    safe_df = sanitize_df_for_excel(df)
-    
-    output = io.BytesIO()
-    try:
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    except Exception as e:
-        log_message(f"⚠️ Falló Excel estándar: {e}. Usando modo texto plano.", "warning")
-        
-        # Paso 2: Fallback de emergencia (todo a string usando la función nueva)
-        try:
-            output = io.BytesIO()
-            fallback_df = safe_df.astype(str)
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(limpiar_celda_excel)
-
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        except Exception as e2:
-             log_message(f"❌ Error fatal en Excel: {e2}", "error")
-             return b""
-
-    output.seek(0)
-    return output.getvalue()
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
-    
-    # 1. Intentar sanitización estándar
-    safe_df = sanitize_df_for_excel(df)
-    
-    output = io.BytesIO()
-    try:
-        # Intento normal
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    except Exception as e:
-        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback.", "warning")
-        
-        # 2. MODO FALLBACK: Convertir TODO a String si falla el anterior
-        try:
-            output = io.BytesIO()
-            fallback_df = safe_df.astype(str) # Forzar todo a texto
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(_safe_excel_str)
-
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        except Exception as e2:
-             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
-             return b""
-
-    output.seek(0)
-    return output.getvalue()
-
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
-    
-    # 1. Intentar sanitización estándar
-    safe_df = sanitize_df_for_excel(df)
-    
-    output = io.BytesIO()
-    try:
-        # Intento normal
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    except Exception as e:
-        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback (texto plano).", "warning")
-        
-        # 2. MODO FALLBACK: Convertir TODO a String
-        # Esto soluciona el ValueError de fechas con zona horaria o tipos mixtos
-        try:
-            output = io.BytesIO()
-            fallback_df = safe_df.astype(str) # Forzar todo a texto
-            
-            # Limpiar caracteres ilegales para Excel
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(lambda x: _safe_excel_str(x))
-
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        except Exception as e2:
-             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
-             return b"" # Retornar vacío si todo falla
-
-    output.seek(0)
-    return output.getvalue()
+def _drop_tz_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Elimina timezone de columnas datetime para compatibilidad Excel"""
+    df2 = df.copy()
+    for c in df2.columns:
+        if is_datetime64tz_dtype(df2[c]):
+            df2[c] = df2[c].dt.tz_localize(None)
+    return df2
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes CSV (robusto)."""
-    if df is None:
-        return b""
-    safe_df = df.copy()
-    # Avoid tz-aware in csv too
-    for col in safe_df.columns:
-        try:
-            if is_datetime64tz_dtype(safe_df[col]):
-                safe_df[col] = pd.to_datetime(safe_df[col], utc=True, errors="coerce").dt.tz_localize(None)
-        except Exception:
-            pass
-    # Convert dict/list in object cols to json strings
-    for col in safe_df.columns:
-        if safe_df[col].dtype == "object":
-            safe_df[col] = safe_df[col].apply(lambda x: json.dumps(x, ensure_ascii=False, default=str) if isinstance(x, (dict, list, tuple, set)) else x)
-    return safe_df.to_csv(index=False).encode("utf-8")
+    """Convierte DataFrame a bytes CSV con UTF-8 BOM"""
+    return df.to_csv(index=False).encode("utf-8-sig")
 
-@measure_time("send_email_report")
-def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
-    smtp_server = env("SMTP_HOST") or "smtp.gmail.com"
-    smtp_port = int(env("SMTP_PORT") or 587)
-    smtp_user = env("SMTP_USER")
-    smtp_pass = env("SMTP_PASS")
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """Convierte DataFrame a bytes Excel"""
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
+        _drop_tz_for_excel(df).to_excel(xw, sheet_name="posts", index=False)
+    bio.seek(0)
+    return bio.read()
 
-    if not smtp_user or not smtp_pass:
-        log_message("Faltan credenciales SMTP", "error")
-        return False, "Faltan credenciales SMTP en .env"
-
-    msg = MIMEMultipart()
-    msg['From'] = smtp_user
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain', 'utf-8'))
-
-    if df_xlsx:
-        part = MIMEBase('application', "octet-stream")
-        part.set_payload(df_xlsx)
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment; filename="reporte_data.xlsx"')
-        msg.attach(part)
-
-    if df_csv:
-        part = MIMEBase('application', "octet-stream")
-        part.set_payload(df_csv)
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment; filename="reporte_data.csv"')
-        msg.attach(part)
-
-    for name, fig_bytes in (figures_dict or {}).items():
-        try:
-            image = MIMEImage(fig_bytes, name=f"{name}.png")
-            image.add_header('Content-Disposition', f'attachment; filename="{name}.png"')
-            msg.attach(image)
-        except Exception as e:
-            log_message(f"No se pudo adjuntar imagen {name}: {e}", "warning")
-
-    try:
-        log_message(f"Conectando a {smtp_server}:{smtp_port}", "debug")
-        server = smtplib.SMTP(smtp_server, smtp_port)
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, to_email, msg.as_string())
-        server.quit()
-        log_message(f"Email enviado exitosamente a {to_email}", "info")
-        return True, "Correo enviado exitosamente."
-    except Exception as e:
-        log_message(f"Error SMTP: {str(e)}", "error", {"smtp_server": smtp_server, "exception": str(e)})
-        return False, f"Error SMTP: {str(e)}"
+def fig_to_bytes(fig) -> bytes:
+    """Convierte figura matplotlib a bytes PNG"""
+    bio = io.BytesIO()
+    fig.savefig(bio, format="png", dpi=100, bbox_inches="tight")
+    bio.seek(0)
+    return bio.read()
 
 # ============================================================================
-# MOTOR IA (DEEPSEEK)
+# WORDCLOUD
 # ============================================================================
 
-@measure_time("generate_executive_summary")
-def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
-    key = env("DEEPSEEK_API_KEY")
-    if not key:
-        log_message("Falta DEEPSEEK_API_KEY", "warning")
-        return "Resumen no disponible (Falta API Key)."
+EXTRA_STOP = {
+    "rt","https","http","t","co","amp","…","si","no","asi","aqui","ahi","ser","estar","haber","hacer",
+    "de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como",
+    "mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me",
+    "hasta","hay","donde","quien","desde","todo","nos","durante","todos","uno","les","ni","contra","otros",
+    "ese","eso","ante","ellos","e","esto","mi","antes","algunos","que","unos","yo","otro","otras","otra","el",
+    "tanto","esa","estos","mucho","quienes","nada","muchos","cual","poco","ella","estas","algunas",
+    "algo","nosotros","mis","tu","tus","ellas","nosotras","vosotros","vosotras","os"
+}
 
-    if df.empty:
-        return "Resumen no disponible (Sin datos)."
-
-    total = len(df)
-    sent_counts = df["sentiment"].value_counts(normalize=True).to_dict() if "sentiment" in df else {}
-
-    if "likes" in df.columns and "text" in df.columns:
-        top_posts = df.sort_values("likes", ascending=False).head(3)
-        top_texts_list = []
-        for _, row in top_posts.iterrows():
-            user = row.get("username", "Anon")
-            txt = str(row.get("text", ""))[:100].replace("\n", " ")
-            likes = int(row.get("likes", 0) or 0)
-            top_texts_list.append(f"- Usuario @{user}: '{txt}...' ({likes} likes)")
-        top_posts_str = "\n".join(top_texts_list)
-    else:
-        top_posts_str = "No hay datos de likes disponibles."
-
-    context = (
-        f"Análisis para: '{query}'.\n"
-        f"Volumen Total: {total} posts.\n"
-        f"Sentimiento: {sent_counts.get('POS',0):.1%} Positivo, {sent_counts.get('NEG',0):.1%} Negativo.\n"
-        f"TOP POSTS VIRALES:\n{top_posts_str}"
-    )
-
-    prompt = (
-        f"Actúa como un analista de inteligencia digital. "
-        f"Escribe un 'Resumen Ejecutivo' breve (máx 500 palabras) en español basado en los datos proporcionados.\n\n"
-        f"DATOS:\n{context}\n\n"
-        f"INSTRUCCIONES CLAVE:\n"
-        f"1. Resume la tendencia general de sentimiento y emociones.\n"
-        f"2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados.\n"
-        f"3. Entrega un resumen de métricas: posteos, interacciones y visualizaciones si están.\n"
-        f"4. Tono profesional."
-    )
-
-    try:
-        log_message("Solicitando resumen ejecutivo a DeepSeek", "debug", {"query": query, "total_posts": total})
-        r = requests.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}"},
-            json={
-                "model": "deepseek-chat",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-                "max_tokens": 300
-            },
-            timeout=25
-        )
-
-        if st.session_state.get("debug_mode"):
-            st.session_state["api_responses"]["deepseek_summary"] = {
-                "status_code": r.status_code,
-                "response": r.json() if r.status_code == 200 else r.text
-            }
-
-        if r.status_code == 200:
-            summary = r.json()['choices'][0]['message']['content'].strip()
-            log_message("Resumen generado exitosamente", "info")
-            return summary
-        else:
-            log_message(f"Error API DeepSeek: {r.status_code}", "error", {"response": r.text})
-            return f"Error API DeepSeek: {r.status_code}"
-    except Exception as e:
-        log_message(f"Error generando resumen: {e}", "error", {"exception": str(e)})
-        return f"Error generando resumen: {e}"
-
-async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, sem: asyncio.Semaphore, max_tokens: int = 10) -> str:
-    deepseek_key = env("DEEPSEEK_API_KEY")
-    if not deepseek_key:
-        return "NEU"
-    async with sem:
-        try:
-            response = await client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                    "max_tokens": max_tokens
-                },
-                headers={"Authorization": f"Bearer {deepseek_key}", "Content-Type": "application/json"},
-                timeout=45.0
-            )
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip().upper()
-                return re.sub(r'[^\w]', '', content)
-            return "NEU"
-        except Exception as e:
-            if st.session_state.get("debug_mode"):
-                log_message(f"Error en async_fetch_deepseek: {e}", "debug")
-            return "NEU"
-
-@measure_time("process_sentiment_batch")
-async def process_sentiment_batch_async(texts: List[str]) -> List[str]:
-    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
-    sem = asyncio.Semaphore(10)
-    async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
-        tasks = []
-        for text in texts:
-            safe_text = (text or "")[:300]
-            prompt = f"Clasifica el sentimiento: '{safe_text}'. Responde EXCLUSIVAMENTE con una palabra: POS, NEG o NEU."
-            tasks.append(async_fetch_deepseek(client, prompt, sem, 5))
-        results = await asyncio.gather(*tasks)
-        final_results = []
-        for r in results:
-            if r in ["POS", "NEG", "NEU"]:
-                final_results.append(r)
-            elif "POS" in r:
-                final_results.append("POS")
-            elif "NEG" in r:
-                final_results.append("NEG")
-            else:
-                final_results.append("NEU")
-        return final_results
-
-@measure_time("process_emotions_batch")
-async def process_emotions_batch_async(texts: List[str]) -> List[str]:
-    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
-    valid_emotions = ["RISA", "IRA", "MIEDO", "TRISTEZA", "DISGUSTO", "SORPRESA", "NEUTRAL"]
-    sem = asyncio.Semaphore(10)
-    async with httpx.AsyncClient(base_url="https://api.deepseek.com", limits=limits, timeout=60.0) as client:
-        tasks = []
-        for text in texts:
-            safe_text = (text or "")[:300]
-            prompt = f"Detecta la emoción en: '{safe_text}'. Opciones: {', '.join(valid_emotions)}. Responde SOLO con la palabra clave."
-            tasks.append(async_fetch_deepseek(client, prompt, sem, 10))
-        results = await asyncio.gather(*tasks)
-
-        clean_results = []
-        for r in results:
-            found = False
-            for emo in valid_emotions:
-                if emo in r:
-                    clean_results.append(emo)
-                    found = True
-                    break
-            if not found:
-                clean_results.append("NEUTRAL")
-        return clean_results
-
-def analyze_sentiment_deepseek_optimized(texts: List[str]) -> List[str]:
-    if not texts:
-        return []
-    try:
-        log_message(f"Analizando sentimiento de {len(texts)} textos", "debug")
-        return asyncio.run(process_sentiment_batch_async(texts))
-    except Exception as e:
-        log_message(f"Error Sentiment Async: {e}", "error")
-        return ["NEU"] * len(texts)
-
-def analyze_emotions_deepseek_optimized(texts: List[str]) -> List[str]:
-    if not texts:
-        return []
-    try:
-        log_message(f"Analizando emociones de {len(texts)} textos", "debug")
-        return asyncio.run(process_emotions_batch_async(texts))
-    except Exception as e:
-        log_message(f"Error Emotions Async: {e}", "error")
-        return ["NEUTRAL"] * len(texts)
-
-# ============================================================================
-# APIFY CORE & FETCHERS
-# ============================================================================
-
-@measure_time("get_apify_items")
-def get_apify_items_sync(dataset_id: str, token: str) -> List[Dict]:
-    url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-    try:
-        log_message(f"Descargando dataset: {dataset_id}", "debug")
-        r = requests.get(url, params={"token": token, "clean": "1", "format": "json"}, timeout=60)
-
-        if st.session_state.get("debug_mode"):
-            st.session_state["api_responses"][f"apify_dataset_{dataset_id}"] = {
-                "status_code": r.status_code,
-                "items_count": len(r.json()) if r.status_code == 200 else 0
-            }
-
-        return r.json() if r.status_code == 200 else []
-    except Exception as e:
-        log_message(f"Error descargando dataset {dataset_id}: {e}", "error")
-        return []
-
-@measure_time("run_apify_actor")
-def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dict]:
-    valid_tokens = [t for t in tokens if t and t.strip()]
-    if not valid_tokens:
-        log_message("No hay tokens Apify válidos", "warning")
-        return []
-
-    for i, token in enumerate(valid_tokens):
-        url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
-        try:
-            log_message(f"Iniciando actor {actor_id} (intento {i+1}/{len(valid_tokens)})", "debug", {"payload": payload})
-            r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
-
-            if r.status_code not in [200, 201]:
-                log_message(f"Error iniciando actor: {r.status_code}", "warning")
-                continue
-
-            run_data = r.json()["data"]
-            run_id, dataset_id = run_data["id"], run_data["defaultDatasetId"]
-            log_message(f"Actor iniciado - Run ID: {run_id}", "info")
-
-            start_time = time.time()
-            while time.time() - start_time < 300:
-                time.sleep(ASYNC_POLL_INTERVAL)
-                try:
-                    r_poll = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}", params={"token": token}, timeout=10)
-                    if r_poll.status_code == 200:
-                        status = r_poll.json()["data"]["status"]
-                        log_message(f"Estado actor: {status}", "debug")
-                        if status == "SUCCEEDED":
-                            return get_apify_items_sync(dataset_id, token)
-                        elif status in ["FAILED", "ABORTED", "TIMED-OUT"]:
-                            log_message(f"Actor falló con estado: {status}", "error")
-                            break
-                except Exception as e:
-                    log_message(f"Error polling actor: {e}", "debug")
-                    continue
-        except Exception as e:
-            log_message(f"Excepción en run_apify_actor: {e}", "error")
-            if i < len(valid_tokens) - 1:
-                continue
-    return []
-
-@measure_time("normalize_common")
-def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
-    log_message(f"Normalizando {len(rows)} filas de {platform}", "debug")
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    col_map = {
-        "text": ["caption", "description", "title", "text", "message", "postText"],
-        "likes": ["likeCount", "likesCount", "diggCount", "likes", "reactionCount"],
-        "comments": ["commentCount", "commentsCount", "comments"],
-        "shares": ["shareCount", "retweetCount", "shares"],
-        "views": ["playCount", "viewCount", "videoPlayCount", "views"],
-        "followers": ["followers", "followersCount", "fans", "followerCount", "userFollowers"],
-        "created_at": ["timestamp", "takenAt", "createTimeISO", "createdAt", "date", "time"]
-    }
-
-    for target, candidates in col_map.items():
-        if target not in df.columns:
-            for c in candidates:
-                if c in df.columns:
-                    df[target] = df[c]
-                    break
-            if target not in df.columns:
-                df[target] = 0 if target in ["likes", "comments", "shares", "views", "followers"] else None
-
-    if "created_at" in df.columns:
-        try:
-            df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
-            df["fecha_cl"] = df["created_at_utc"].dt.date
-            df["created_at_display"] = df["created_at_utc"].dt.tz_localize(None)
-
-            failed = df["created_at_utc"].isna().sum()
-            if failed > 0:
-                log_message(f"⚠️ {failed} fechas no convertidas", "warning")
-        except Exception as e:
-            log_message(f"Error en conversión de fechas: {e}", "error")
-            df["created_at_utc"] = pd.NaT
-            df["fecha_cl"] = None
-            df["created_at_display"] = pd.NaT
-
-    if "username" not in df.columns:
-        for c in ["ownerUsername", "authorUsername", "username", "author", "pageName"]:
-            if c in df.columns:
-                df["username"] = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
-                break
-
-    if "text" in df.columns:
-        df["text"] = df["text"].fillna("").astype(str)
-
-    for col in ["likes", "comments", "shares", "views", "followers"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-
-    df["platform"] = platform
-    log_message(f"Normalización completa: {df.shape}", "debug")
-    return df
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
-    log_message(f"Fetching X con query: {query}", "info")
-    headers = {"x-api-key": api_key}
-    all_rows = []
-    cursor = None
-    max_loops = (limit // 20) + 5
-    for loop_num in range(max_loops):
-        params = {"query": query, "queryType": "Latest"}
-        if cursor:
-            params["cursor"] = cursor
-        try:
-            r = requests.get(API_URL_X, headers=headers, params=params, timeout=20)
-
-            if st.session_state.get("debug_mode"):
-                st.session_state["api_responses"][f"x_request_{loop_num}"] = {
-                    "status_code": r.status_code,
-                    "cursor": cursor,
-                    "tweets_count": len(r.json().get("tweets", [])) if r.status_code == 200 else 0
-                }
-
-            if r.status_code != 200:
-                log_message(f"Error API X: {r.status_code}", "warning")
-                break
-            data = r.json()
-            tweets = data.get("tweets", [])
-            if not tweets:
-                break
-            for t in tweets:
-                u = t.get("author", {}) or {}
-                all_rows.append({
-                    "id": t.get("id"),
-                    "created_at": t.get("createdAt"),
-                    "username": u.get("userName"),
-                    "text": t.get("text"),
-                    "likes": t.get("likeCount", 0),
-                    "comments": t.get("replyCount", 0),
-                    "shares": t.get("retweetCount", 0),
-                    "views": t.get("viewCount", 0),
-                    "followers": u.get("followers") or u.get("followersCount") or 0,
-                    "url": t.get("url"),
-                })
-            if len(all_rows) >= limit:
-                break
-            cursor = data.get("next_cursor") if data.get("has_next_page") else None
-            if not cursor:
-                break
-        except Exception as e:
-            log_message(f"Excepción en fetch_x: {e}", "error")
-            break
-
-    log_message(f"Total tweets obtenidos: {len(all_rows)}", "info")
-    return normalize_common_optimized(all_rows, "x")
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
-    log_message(f"Fetching Facebook ({mode}): {query}", "info")
-    payload = {"resultsLimit": limit, "maxPosts": limit}
-    actor = "apify/facebook-posts-scraper"
-    if mode == "user":
-        urls = []
-        for u in query.split(","):
-            u = u.strip()
-            if "facebook.com" in u:
-                urls.append({"url": u})
-            else:
-                urls.append({"url": f"https://www.facebook.com/{u}"})
-        payload["startUrls"] = urls
-    else:
-        recent_filter = "eyJzb3J0X2tleSI6InRECENT_POSTS_V2In0%3D"
-        payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}&filters={recent_filter}"}]
-    try:
-        items = run_apify_actor(actor, tokens, payload)
-        normalized = []
-        for i in items:
-            normalized.append({
-                "id": i.get("postId"),
-                "text": i.get("text") or i.get("postText") or i.get("message"),
-                "username": (i.get("user") or {}).get("name"),
-                "likes": i.get("likes", 0),
-                "comments": i.get("comments", 0),
-                "shares": i.get("shares", 0),
-                "url": i.get("url") or i.get("postUrl"),
-                "created_at": i.get("time") or i.get("timestamp")
-            })
-        return normalize_common_optimized(normalized, "facebook")
-    except Exception as e:
-        log_message(f"Error fetch_facebook: {e}", "error")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
-    log_message(f"Fetching Instagram ({mode}): {query}", "info")
-    payload = {"resultsLimit": limit, "resultsType": "posts"}
-    if mode == "hashtag":
-        actor = "apify/instagram-hashtag-scraper"
-        payload["hashtags"] = [h.strip().replace("#", "") for h in query.split(",")]
-    elif mode == "keyword":
-        actor = "apify/instagram-scraper"
-        payload["search"] = query
-        payload["searchType"] = "hashtag"
-    else:
-        actor = "apify/instagram-post-scraper"
-        payload["usernames"] = [u.strip() for u in query.split(",")]
-    items = run_apify_actor(actor, tokens, payload)
-    return normalize_common_optimized(items, "instagram")
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
-    log_message(f"Fetching TikTok ({mode}): {query}", "info")
-    payload = {"resultsPerPage": 100, "shouldDownloadVideos": False, "limit": limit}
-    if mode == "user":
-        payload["usernames"] = [u.strip() for u in query.split(",")]
-    else:
-        payload["hashtags"] = [h.strip().replace("#", "") for h in query.split(",")]
-    items = run_apify_actor("clockworks/tiktok-scraper", tokens, payload)
-    return normalize_common_optimized(items, "tiktok")
-
-# ============================================================================
-# FILTRO FECHAS
-# ============================================================================
-
-def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-
-    if "fecha_cl" not in df.columns:
-        log_message("Columna 'fecha_cl' no encontrada, saltando filtrado", "warning")
-        return df
-
-    current = datetime.now(SCL_TZ).date()
-    if d1 and d1 > current:
-        log_message(f"Ajustando fecha 'desde' futura: {d1} → {current}", "warning")
-        d1 = current
-    if d2 and d2 > current:
-        log_message(f"Ajustando fecha 'hasta' futura: {d2} → {current}", "warning")
-        d2 = current
-
-    try:
-        def safe_date_str(x):
-            if pd.isna(x):
-                return None
-            try:
-                if isinstance(x, str):
-                    return x[:10]
-                elif isinstance(x, date):
-                    return x.isoformat()
-                elif isinstance(x, pd.Timestamp):
-                    return x.date().isoformat()
-                elif hasattr(x, 'strftime'):
-                    return pd.to_datetime(x).date().isoformat()
-                else:
-                    return str(x)[:10]
-            except Exception:
-                return None
-
-        df_work = df.copy()
-        df_work["_fecha_str"] = df_work["fecha_cl"].apply(safe_date_str)
-
-        d1_str = d1.isoformat() if d1 else None
-        d2_str = d2.isoformat() if d2 else None
-
-        mask = pd.Series(True, index=df_work.index)
-        if d1_str:
-            mask &= ((df_work["_fecha_str"] >= d1_str) | (df_work["_fecha_str"].isna()))
-        if d2_str:
-            mask &= ((df_work["_fecha_str"] <= d2_str) | (df_work["_fecha_str"].isna()))
-
-        filtered = df.loc[mask].copy()
-
-        removed = len(df) - len(filtered)
-        log_message(f"Filtrado: {len(df)} → {len(filtered)} ({removed} removidos)", "info")
-
-        if st.session_state.get("debug_mode"):
-            log_message(
-                "Detalles filtrado",
-                "debug",
-                {
-                    "original": len(df),
-                    "filtered": len(filtered),
-                    "removed": removed,
-                    "d1": d1_str,
-                    "d2": d2_str,
-                    "null_dates": df_work["_fecha_str"].isna().sum(),
-                    "fecha_cl_dtype": str(df["fecha_cl"].dtype),
-                    "sample_dates": df_work["_fecha_str"].dropna().head(3).tolist()
-                }
-            )
-
-        return filtered
-
-    except Exception as e:
-        log_message(f"Error en filtrado: {e}", "error", {"traceback": traceback.format_exc()})
-        st.warning(f"⚠️ Error al filtrar fechas: {e}. Mostrando todos los datos.")
-        return df
-
-# ============================================================================
-# VISUALES + NLP
-# ============================================================================
-
-def plot_pie_chart(series, title):
-    if series is None or series.empty:
-        return None
-    counts = series.value_counts()
-    fig, ax = plt.subplots(figsize=(6, 6))
-    fig.patch.set_facecolor('white')
-    ax.pie(counts, labels=counts.index, autopct='%1.1f%%', startangle=90)
-    ax.set_title(title, fontsize=12, fontweight='bold')
-    return fig
-
-def plot_bar_chart(series, title, color_hex="#3498db"):
-    if series is None or series.empty:
-        return None
-    counts = series.value_counts()
-    fig, ax = plt.subplots(figsize=(6, 5))
-    fig.patch.set_facecolor('white')
-    ax.bar(counts.index, counts.values, color=color_hex)
-    ax.set_title(title, fontsize=12, fontweight='bold')
-    ax.set_ylabel("Cantidad")
-    plt.tight_layout()
-    return fig
+STOP = STOPWORDS.union(EXTRA_STOP)
 
 def clean_texts(texts: pd.Series) -> str:
+    """Limpia y normaliza textos para wordcloud"""
     blob = []
-    EXTRA_STOP = {"rt","https","http","t","co","amp","si","no","de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"}
-    STOP = STOPWORDS.union(EXTRA_STOP)
+    url_re = re.compile(r"http\S+|www\.\S+", re.I)
     for s in texts.fillna("").astype(str):
-        s = re.sub(r"http\S+|www\.\S+|@\w+|#", " ", s.lower())
+        s = s.lower()
+        s = url_re.sub(" ", s)
+        s = re.sub(r"@\w+|#", " ", s)
         s = unidecode(s)
         s = re.sub(r"[^a-z\s]", " ", s)
         words = [w for w in s.split() if w not in STOP and len(w) > 2]
@@ -1014,54 +145,342 @@ def clean_texts(texts: pd.Series) -> str:
     return " ".join(blob)
 
 def wordcloud_from_blob(blob: str, max_words: int = 200):
+    """Genera y muestra nube de palabras"""
     if not blob.strip():
-        return None
-    wc = WordCloud(width=1200, height=500, background_color="white", max_words=max_words, colormap="viridis").generate(blob)
+        st.info("No hay texto suficiente para la nube de palabras.")
+        return
+    
+    wc = WordCloud(
+        width=1200, height=500, background_color="white", collocations=False,
+        stopwords=STOP, max_words=max_words, colormap="viridis"
+    ).generate(blob)
+    
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.imshow(wc, interpolation='bilinear')
     ax.axis("off")
-    return fig
+    st.pyplot(fig)
+    plt.close()
 
-def extract_topics(texts: List[str], top_n: int = 10) -> Dict[str, int]:
-    blob = clean_texts(pd.Series(texts))
-    return dict(Counter(blob.split()).most_common(top_n))
+# ============================================================================
+# HELPERS
+# ============================================================================
 
-@measure_time("detect_crisis_signals")
-def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
+def _first_series(df: pd.DataFrame, candidates: List[str], default=None) -> pd.Series:
+    """Retorna la primera columna que existe en el DataFrame"""
+    for c in candidates:
+        if c in df.columns and df[c].notna().any():
+            return df[c]
+    return pd.Series([default] * len(df), index=df.index)
+
+def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
+    """Filtra DataFrame por ventana de fechas"""
+    if df is None or df.empty:
+        return df
+    
+    if "created_at_cl" not in df.columns or df["created_at_cl"].isna().all():
+        if "created_at" in df.columns:
+            try:
+                df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+                df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
+            except Exception as e:
+                log_message(f"Error convirtiendo fechas: {e}", "warning")
+                return df
+    
+    if "created_at_cl" not in df.columns or df["created_at_cl"].isna().all():
+        return df
+    
+    mask = pd.Series(True, index=df.index)
+    if d1:
+        mask &= df["created_at_cl"].dt.date >= d1
+    if d2:
+        mask &= df["created_at_cl"].dt.date <= d2
+    
+    filtered = df.loc[mask].copy()
+    log_message(f"Filtrado de fechas: {len(df)} → {len(filtered)} registros")
+    return filtered
+
+def floor_day_local_safe(s: pd.Series) -> pd.Series:
+    """Normaliza fechas a día completo evitando errores de DST"""
+    try:
+        return s.dt.tz_localize(None).dt.normalize()
+    except Exception:
+        return pd.to_datetime(s.dt.strftime("%Y-%m-%d"))
+
+def retry_on_failure(func: Callable, max_retries: int = MAX_RETRIES, delay: int = RETRY_DELAY, *args, **kwargs):
+    """Ejecuta función con reintentos en caso de fallo"""
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                log_message(f"Intento {attempt + 1} falló: {e}. Reintentando en {delay}s...", "warning")
+                time.sleep(delay * (attempt + 1))
+            else:
+                log_message(f"Error tras {max_retries} intentos: {e}", "error")
+                raise
+
+# ============================================================================
+# VALORIZACIÓN EN USD - FUNCIÓN PRINCIPAL
+# ============================================================================
+
+@measure_time("calculate_post_value_usd")
+def calculate_post_value_usd(df: pd.DataFrame, 
+                             platform: str = "instagram",
+                             cpm_base: float = 5.0,
+                             cost_per_engagement: float = 0.05) -> pd.DataFrame:
+    """
+    Calcula el valor de cada post en dólares USD usando método híbrido.
+    
+    Parámetros:
+    -----------
+    df : pd.DataFrame
+        DataFrame con datos de posts (likes, shares, followers, sentiment)
+    
+    platform : str
+        Plataforma: 'x', 'instagram', 'facebook', 'tiktok'
+        Determina CPM automático si no se especifica
+    
+    cpm_base : float
+        Costo por mil impressiones (default $5)
+        X: $1.5, Instagram: $5.0, Facebook: $4.0, TikTok: $2.0
+    
+    cost_per_engagement : float
+        Costo por engagement (default $0.05)
+        X: $0.02, Instagram: $0.05, Facebook: $0.04, TikTok: $0.03
+    
+    Retorna:
+    --------
+    pd.DataFrame con 4 nuevas columnas:
+    - value_cpm: Valor basado en impressiones
+    - value_engagement: Valor basado en interacciones
+    - post_value_usd: Valor final en dólares
+    - post_value_category: Categoría (BAJO/MEDIO/ALTO/VIRAL)
+    """
+    
+    if df is None or df.empty:
+        log_message("DataFrame vacío, saltando valorización USD", "warning")
+        return df
+    
+    df_value = df.copy()
+    
+    # PASO 1: AUTO-DETECTAR CPM Y ENGAGEMENT COST POR PLATAFORMA
+    platform_lower = str(platform).lower().replace("(", "").replace(")", "").replace("twitter", "x")
+    
+    if cpm_base == 5.0 and cost_per_engagement == 0.05:  # Valores default
+        platform_cpm_map = {
+            'x': 1.5, 'twitter': 1.5,
+            'instagram': 5.0,
+            'facebook': 4.0,
+            'tiktok': 2.0
+        }
+        cpm_base = platform_cpm_map.get(platform_lower, 5.0)
+        
+        platform_engagement_map = {
+            'x': 0.02, 'twitter': 0.02,
+            'instagram': 0.05,
+            'facebook': 0.04,
+            'tiktok': 0.03
+        }
+        cost_per_engagement = platform_engagement_map.get(platform_lower, 0.05)
+    
+    log_message(
+        f"💰 Valorización USD iniciada | Plataforma: {platform_lower} | "
+        f"CPM: ${cpm_base} | CPE: ${cost_per_engagement}",
+        "info"
+    )
+    
+    # PASO 2: NORMALIZAR CAMPOS DE CONTEO
+    for col in ['likes', 'comments', 'shares', 'views', 'followers']:
+        if col not in df_value.columns:
+            df_value[col] = 0
+        else:
+            df_value[col] = pd.to_numeric(df_value[col], errors='coerce').fillna(0).astype(int)
+    
+    # PASO 3: CREAR/NORMALIZAR IMPRESSIONS
+    if 'impressions' not in df_value.columns:
+        df_value['impressions'] = (df_value['followers'] * 10).astype(int)
+        log_message("📊 Impressions estimadas (followers × 10)", "debug")
+    else:
+        df_value['impressions'] = pd.to_numeric(df_value['impressions'], errors='coerce').fillna(0).astype(int)
+    
+    df_value['impressions'] = df_value['impressions'].replace(0, 1)
+    
+    # PASO 4: CALCULAR VALOR POR CPM (Reach)
+    df_value['value_cpm'] = (df_value['impressions'] / 1000) * cpm_base
+    
+    # PASO 5: CALCULAR VALOR POR ENGAGEMENT
+    total_engagement = (df_value['likes'] + df_value['comments'] + df_value['shares'])
+    df_value['value_engagement'] = total_engagement * cost_per_engagement
+    
+    # PASO 6: CALCULAR VALOR FINAL (Promedio Híbrido)
+    df_value['post_value_usd'] = (
+        (df_value['value_cpm'] + df_value['value_engagement']) / 2
+    ).round(2)
+    
+    # PASO 7: AJUSTE POR SENTIMIENTO
+    if 'sentiment' in df_value.columns and df_value['sentiment'].notna().any():
+        sentiment_multiplier = df_value['sentiment'].map({
+            'POS': 1.2, 'NEU': 1.0, 'NEG': 0.7
+        }).fillna(1.0)
+        df_value['post_value_usd'] = (df_value['post_value_usd'] * sentiment_multiplier).round(2)
+        log_message("✅ Ajuste por sentimiento aplicado", "debug")
+    
+    # PASO 8: CATEGORIZAR POR RANGO DE VALOR
+    def categorize_value(value):
+        if value >= 500:
+            return "VIRAL 🚀"
+        elif value >= 100:
+            return "ALTO 📈"
+        elif value >= 25:
+            return "MEDIO 📊"
+        else:
+            return "BAJO 📉"
+    
+    df_value['post_value_category'] = df_value['post_value_usd'].apply(categorize_value)
+    
+    # PASO 9: LOGGING Y MÉTRICAS
+    total_value = df_value['post_value_usd'].sum()
+    avg_value = df_value['post_value_usd'].mean()
+    max_value = df_value['post_value_usd'].max()
+    min_value = df_value['post_value_usd'].min()
+    
+    log_message(
+        f"💰 Valorización completada | "
+        f"Total: ${total_value:,.2f} | "
+        f"Promedio: ${avg_value:.2f} | "
+        f"Rango: ${min_value:.2f} - ${max_value:.2f}",
+        "info"
+    )
+    
+    if st.session_state.get("debug_mode"):
+        log_message(
+            "Detalles valorización USD",
+            "debug",
+            {
+                "total_posts": len(df_value),
+                "total_value_usd": float(total_value),
+                "avg_value_usd": float(avg_value),
+                "platform": platform_lower,
+                "cpm_base": cpm_base,
+                "cost_per_engagement": cost_per_engagement
+            }
+        )
+    
+    return df_value
+
+# ============================================================================
+# NORMALIZE DATA
+# ============================================================================
+
+def normalize_common(rows: List[Dict], platform: str) -> pd.DataFrame:
+    """Normaliza datos de diferentes plataformas a esquema común"""
+    df = pd.DataFrame(rows) if isinstance(rows, list) else pd.DataFrame()
+    
     if df.empty:
-        return {"score": 0, "severity": "none", "signals": [], "crisis_posts": pd.DataFrame()}
+        return df
+    
+    log_message(f"Normalizando {len(df)} registros de {platform}")
+    
+    if platform == "x":
+        pass
+    elif platform == "instagram":
+        df["text"] = _first_series(df, ["caption", "title", "description", "alt"], "")
+        df["username"] = _first_series(df, ["ownerUsername", "authorUsername", "username"], "")
+        df["likes"] = pd.to_numeric(_first_series(df, ["likesCount", "likeCount"], 0), errors="coerce").fillna(0)
+        df["comments"] = pd.to_numeric(_first_series(df, ["commentsCount", "commentCount"], 0), errors="coerce").fillna(0)
+        df["shares"] = pd.to_numeric(_first_series(df, ["shares", "shareCount"], 0), errors="coerce").fillna(0)
+        df["views"] = pd.to_numeric(_first_series(df, ["videoPlayCount", "playCount", "views"], 0), errors="coerce").fillna(0)
+        
+        url_guess = _first_series(df, ["url", "link", "postUrl"], "")
+        short_code = _first_series(df, ["shortCode", "shortcode", "code"], None)
+        df["url"] = url_guess
+        
+        try:
+            mask_missing_url = url_guess.isna() | (url_guess.astype(str).str.strip() == "")
+        except Exception:
+            mask_missing_url = pd.Series(False, index=df.index)
+        
+        if short_code is not None:
+            sc_series = short_code.astype(str)
+            sc_valid = sc_series.str.len() > 0
+            if sc_valid.any():
+                df.loc[sc_valid & mask_missing_url, "url"] = "https://www.instagram.com/p/" + sc_series
+        
+        df["id"] = _first_series(df, ["id", "shortCode", "shortcode", "code", "postId"], "")
+        df["created_at"] = _first_series(df, ["timestamp", "takenAt", "publishedTime", "createTime", "taken_at", "created_at"], None)
+        
+        created_epoch = pd.to_numeric(
+            _first_series(df, ["takenAtTimestamp", "taken_at_timestamp", "created_timestamp", "date"], None),
+            errors="coerce"
+        )
+        if created_epoch.notna().any():
+            mask = df["created_at"].isna() if "created_at" in df.columns else pd.Series(True, index=df.index)
+            if mask.any():
+                df.loc[mask, "created_at"] = pd.to_datetime(created_epoch[mask], unit="s", utc=True, errors="coerce")
+    
+    elif platform == "tiktok":
+        df["text"] = _first_series(df, ["text", "title", "desc", "caption"], "")
+        
+        if "authorMeta" in df.columns:
+            try:
+                df["username"] = df["authorMeta"].apply(
+                    lambda x: (x or {}).get("name") or (x or {}).get("uniqueId") if isinstance(x, dict) else None
+                )
+            except Exception:
+                pass
+        
+        if "username" not in df.columns or df["username"].isna().all():
+            df["username"] = _first_series(df, ["username", "author", "authorUsername", "authorName", "authorUniqueId"], "")
+        
+        df["likes"] = pd.to_numeric(_first_series(df, ["diggCount", "likeCount"], 0), errors="coerce").fillna(0)
+        df["comments"] = pd.to_numeric(_first_series(df, ["commentCount"], 0), errors="coerce").fillna(0)
+        df["shares"] = pd.to_numeric(_first_series(df, ["shareCount"], 0), errors="coerce").fillna(0)
+        df["views"] = pd.to_numeric(_first_series(df, ["playCount", "viewCount"], 0), errors="coerce").fillna(0)
+        df["url"] = _first_series(df, ["webVideoUrl", "url", "shareUrl"], "")
+        df["id"] = _first_series(df, ["id", "videoId"], "")
+        
+        created_iso = _first_series(df, ["createTimeISO", "datetime", "publishedTime"], None)
+        created_unix = pd.to_numeric(_first_series(df, ["createTime"], None), errors="coerce")
+        df["created_at"] = created_iso
+        
+        mask_fill = df["created_at"].isna() & created_unix.notna()
+        if mask_fill.any():
+            df.loc[mask_fill, "created_at"] = pd.to_datetime(created_unix[mask_fill], unit="s", utc=True, errors="coerce")
+    
+    elif platform == "facebook":
+        df["text"] = _first_series(df, ["text", "content", "message"], "")
+        df["username"] = _first_series(df, ["author", "pageName", "username", "from"], "")
+        df["likes"] = pd.to_numeric(_first_series(df, ["likes", "reactions"], 0), errors="coerce").fillna(0)
+        df["comments"] = pd.to_numeric(_first_series(df, ["comments"], 0), errors="coerce").fillna(0)
+        df["shares"] = pd.to_numeric(_first_series(df, ["shares"], 0), errors="coerce").fillna(0)
+        df["views"] = pd.to_numeric(_first_series(df, ["views"], 0), errors="coerce").fillna(0)
+        df["url"] = _first_series(df, ["url", "postUrl", "link"], "")
+        df["id"] = _first_series(df, ["id", "postId"], "")
+        df["created_at"] = _first_series(df, ["date", "publishedTime", "time", "createdAt", "timestamp"], None)
+    
+    try:
+        df["created_at_utc"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+        df["created_at_cl"] = df["created_at_utc"].dt.tz_convert(SCL_TZ)
+        df["fecha_cl"] = df["created_at_cl"].dt.date
+    except Exception as e:
+        log_message(f"Error procesando fechas: {e}", "warning")
+    
+    df["platform"] = platform
+    
+    cols = ["platform", "created_at_cl", "username", "text", "likes", "shares", "comments", "views", "url", "id"]
+    final_df = df[[c for c in cols if c in df.columns]]
+    
+    log_message(f"Normalizados {len(final_df)} registros de {platform}")
+    return final_df
 
-    signals = []
-    crisis_score = 0
-    keywords = ["crisis", "emergencia", "caída", "fallo", "problema", "error", "incidente", "demanda", "denuncia", "escándalo", "fraude", "robo", "ataque"]
+# ============================================================================
+# X / TWITTER (twitterapi.io)
+# ============================================================================
 
-    if "sentiment" in df.columns:
-        neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
-        if neg_ratio > 0.3:
-            signals.append(f"Sentimiento negativo alto: {neg_ratio*100:.1f}%")
-            crisis_score += 25
-
-    crisis_posts = pd.DataFrame()
-    if "text" in df.columns:
-        crisis_posts = df[df["text"].str.lower().str.contains("|".join(keywords), regex=True, na=False)].copy()
-        if len(crisis_posts) > 0:
-            count = len(crisis_posts)
-            signals.append(f"Posts con palabras de crisis: {count}")
-            crisis_score += min(30, count * 5)
-            if "followers" in df.columns:
-                influencers = crisis_posts[crisis_posts["followers"] > 10000]
-                if not influencers.empty:
-                    crisis_score += min(30, len(influencers) * 10)
-                    signals.append(f"⚠️ {len(influencers)} cuenta(s) influyente(s) involucrada(s)")
-
-    crisis_score = min(100, crisis_score)
-    severity = "critical" if crisis_score >= 80 else "high" if crisis_score >= 60 else "medium" if crisis_score >= 30 else "low"
-
-    log_message(f"Detección de crisis: score={crisis_score}, severity={severity}", "info", {"signals": signals})
-    return {"score": crisis_score, "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
-
-def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
-    q = (topic or "").strip()
+def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
+                    d1: Optional[date], d2: Optional[date]) -> str:
+    """Compone query de búsqueda para X"""
+    q = topic.strip()
     if not q.startswith("("):
         q = f"({q})"
     if lang:
@@ -1070,17 +489,16 @@ def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
         q += " -is:retweet"
     if exclude_repl:
         q += " -is:reply"
-    if filter_chile:
-        q += " place_country:CL"
     if d1:
         q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2:
         q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
-    log_message(f"Query X generado: {q}", "debug")
     return q
 
-def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
-    u = (username or "").strip().lstrip("@")
+def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool,
+                         d1: Optional[date], d2: Optional[date]) -> str:
+    """Compone query de usuario para X"""
+    u = username.strip().lstrip("@")
     q = f"from:{u}"
     if lang:
         q += f" lang:{lang}"
@@ -1088,396 +506,1104 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
         q += " -is:retweet"
     if exclude_repl:
         q += " -is:reply"
-    if filter_chile:
-        q += " place_country:CL"
     if d1:
         q += f" since:{d1.isoformat()}_00:00:00_UTC"
     if d2:
         q += f" until:{(d2 + timedelta(days=1)).isoformat()}_00:00:00_UTC"
-    log_message(f"Query X user generado: {q}", "debug")
     return q
 
+def normalize_rows_x(data: Dict) -> List[Dict]:
+    """Normaliza respuesta de API de X"""
+    rows = []
+    for t in data.get("tweets", []) or []:
+        a = t.get("author") or {}
+        rows.append({
+            "id": t.get("id"),
+            "created_at": t.get("createdAt"),
+            "username": a.get("userName"),
+            "text": t.get("text"),
+            "likes": t.get("likeCount", 0),
+            "comments": t.get("replyCount", 0),
+            "shares": t.get("retweetCount", 0),
+            "views": t.get("viewCount", 0),
+            "url": t.get("url"),
+            "platform": "x",
+        })
+    return rows
+
+def fetch_x(api_key: str, query: str, query_type: str = "Latest", limit: int = 300,
+            sleep_s: float = 5.2, progress_cb: Optional[Callable] = None) -> pd.DataFrame:
+    """Obtiene tweets de X usando twitterapi.io"""
+    headers = {"x-api-key": api_key}
+    cursor = None
+    seen = 0
+    acc = []
+    
+    log_message(f"Buscando en X: '{query}' (límite: {limit})")
+    
+    while seen < limit:
+        params = {"query": query, "queryType": query_type}
+        if cursor:
+            params["cursor"] = cursor
+        
+        try:
+            r = requests.get(API_URL_X, headers=headers, params=params, timeout=30)
+            
+            if r.status_code == 429:
+                log_message("Rate limit alcanzado, esperando...", "warning")
+                time.sleep(max(sleep_s, 5.2))
+                continue
+            
+            if r.status_code != 200:
+                raise RuntimeError(f"X API {r.status_code}: {r.text[:300]}")
+            
+            data = r.json()
+            rows = normalize_rows_x(data)
+            
+            if not rows:
+                break
+            
+            for row in rows:
+                acc.append(row)
+                seen += 1
+                if progress_cb:
+                    progress_cb(min(seen / max(1, limit), 1.0))
+                if seen >= limit:
+                    break
+            
+            cursor = data.get("next_cursor") if data.get("has_next_page") else None
+            if not cursor:
+                break
+            
+            time.sleep(sleep_s)
+        
+        except Exception as e:
+            log_message(f"Error en fetch_x: {e}", "error")
+            raise
+    
+    df = normalize_common(acc, "x")
+    
+    if not df.empty and "id" in df.columns:
+        original_len = len(df)
+        df.drop_duplicates(subset=["id"], inplace=True)
+        log_message(f"Eliminados {original_len - len(df)} duplicados")
+    
+    return df
+
 # ============================================================================
-# UI STREAMLIT
+# APIFY - Funciones robustas
+# ============================================================================
+
+def _apify_fetch_dataset_items(dataset_id: str, token: str, limit: int = 200) -> List[Dict]:
+    """Obtiene items de un dataset de Apify"""
+    url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+    params = {"token": token, "clean": "1", "limit": str(limit), "format": "json"}
+    
+    log_message(f"Obteniendo dataset {dataset_id[:8]}...")
+    
+    r = requests.get(url, params=params, timeout=60)
+    
+    if r.status_code != 200:
+        raise RuntimeError(f"Apify dataset {dataset_id} {r.status_code}: {r.text[:300]}")
+    
+    ctype = (r.headers.get("Content-Type") or "").lower().strip()
+    text = (r.text or "").strip()
+    
+    if "application/json" in ctype or text.startswith("[") or text.startswith("{"):
+        try:
+            data = r.json()
+            if isinstance(data, dict) and "items" in data:
+                return data["items"]
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    
+    if "ndjson" in ctype or "\n{" in text:
+        out = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                pass
+        return out
+    
+    try:
+        df_tmp = pd.read_csv(io.StringIO(text))
+        return df_tmp.to_dict(orient="records")
+    except Exception:
+        return []
+
+def _apify_run_async_and_get_items(actor_id: str, token: str, payload: Dict,
+                                   limit: int = 200, max_wait_s: int = ASYNC_MAX_WAIT,
+                                   poll_every_s: int = ASYNC_POLL_INTERVAL) -> List[Dict]:
+    """Ejecuta actor de Apify de forma asíncrona con polling"""
+    url_run = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/runs"
+    
+    log_message(f"Iniciando run asíncrono de {actor_id}")
+    
+    r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
+    
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Apify {actor_id} start {r.status_code}: {r.text[:300]}")
+    
+    data = r.json().get("data") or {}
+    run_id = data.get("id")
+    
+    if not run_id:
+        raise RuntimeError(f"Apify {actor_id}: no run id en respuesta")
+    
+    log_message(f"Run ID: {run_id}, esperando finalización...")
+    
+    url_status = f"https://api.apify.com/v2/actor-runs/{run_id}"
+    waited = 0
+    status = data.get("status", "RUNNING")
+    
+    while waited <= max_wait_s:
+        time.sleep(poll_every_s)
+        waited += poll_every_s
+        
+        try:
+            rr = requests.get(url_status, params={"token": token}, timeout=20)
+            
+            if rr.status_code == 200:
+                d = rr.json().get("data") or {}
+                status = d.get("status", status)
+                log_message(f"Status: {status} ({waited}s/{max_wait_s}s)")
+                
+                if status == "SUCCEEDED":
+                    dataset_id = d.get("defaultDatasetId") or d.get("datasetId")
+                    if not dataset_id:
+                        raise RuntimeError(f"Apify {actor_id}: run sin datasetId")
+                    return _apify_fetch_dataset_items(dataset_id, token, limit=limit)
+                
+                if status in ("FAILED", "TIMED-OUT", "ABORTED"):
+                    raise RuntimeError(f"Apify {actor_id}: run {status}")
+        
+        except requests.exceptions.RequestException as e:
+            log_message(f"Error en polling: {e}", "warning")
+    
+    raise RuntimeError(f"Apify {actor_id}: timeout tras {max_wait_s}s (run {run_id})")
+
+def apify_run_sync_items(actor_id: str, token: str, payload: Dict,
+                         limit: int = 200, timeout_s: int = DEFAULT_TIMEOUT) -> List[Dict]:
+    """Ejecuta actor de Apify con fallback a modo asíncrono"""
+    url = f"https://api.apify.com/v2/acts/{actor_id.replace('/', '~')}/run-sync-get-dataset-items"
+    
+    payload_with_proxy = dict(payload)
+    payload_with_proxy.setdefault("proxyConfiguration", {"useApifyProxy": True})
+    
+    params = {"token": token, "limit": str(limit), "clean": "1", "format": "json"}
+    
+    log_message(f"Ejecutando {actor_id} (sync, timeout={timeout_s}s)")
+    
+    try:
+        r = requests.post(url, params=params, json=payload_with_proxy, timeout=timeout_s)
+        
+        if r.status_code in (408, 504, 524):
+            log_message(f"Timeout {r.status_code}, fallback a modo async", "warning")
+            return _apify_run_async_and_get_items(actor_id, token, payload_with_proxy, limit=limit)
+        
+        if r.status_code not in (200, 201):
+            raise RuntimeError(f"Apify {actor_id} {r.status_code}: {r.text[:300]}")
+        
+        ctype = (r.headers.get("Content-Type") or "").lower().strip()
+        text = (r.text or "").strip()
+        
+        if "application/json" in ctype or text.startswith("{") or text.startswith("["):
+            try:
+                data = r.json()
+                if isinstance(data, dict) and "items" in data:
+                    return data["items"]
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                pass
+        
+        if "ndjson" in ctype or "\n{" in text:
+            items = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    pass
+            return items
+        
+        try:
+            df_tmp = pd.read_csv(io.StringIO(text))
+            return df_tmp.to_dict(orient="records")
+        except Exception:
+            return []
+    
+    except requests.exceptions.ReadTimeout:
+        log_message("ReadTimeout, fallback a modo async", "warning")
+        return _apify_run_async_and_get_items(
+            actor_id, token, payload_with_proxy,
+            limit=limit, max_wait_s=max(timeout_s * 2, 300)
+        )
+    
+    except requests.exceptions.RequestException as e:
+        log_message(f"RequestException: {e}, fallback a async", "warning")
+        return _apify_run_async_and_get_items(actor_id, token, payload_with_proxy, limit=limit)
+
+# ============================================================================
+# INSTAGRAM
+# ============================================================================
+
+def parse_instagram_usernames(raw: str) -> List[str]:
+    """Parse usernames/URLs de Instagram"""
+    users = []
+    for piece in [p.strip() for p in re.split(r"[ ,]+", raw or "") if p.strip()]:
+        if piece.startswith("http://") or piece.startswith("https://"):
+            try:
+                path = urlparse(piece).path.strip("/")
+                user = path.split("/")[0]
+                if user:
+                    users.append(user)
+            except Exception:
+                continue
+        else:
+            users.append(piece.lstrip("@"))
+    
+    seen = set()
+    out = []
+    for u in users:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+def _ig_is_post(item: Dict) -> bool:
+    """Detecta si un item es un post de Instagram"""
+    if not isinstance(item, dict):
+        return False
+    
+    k = {str(x).lower() for x in item.keys()}
+    
+    if any(x in k for x in ("shortcode", "short_code", "code")):
+        return True
+    
+    if any(x in k for x in ("caption", "takenat", "takenattimestamp", "timestamp", "publishedtime", "createtime", "created_timestamp", "date")):
+        return True
+    
+    url = str(item.get("url") or item.get("link") or "")
+    if "/p/" in url:
+        return True
+    
+    t = str(item.get("type") or "")
+    if t in ("post", "Post", "GraphImage", "GraphVideo", "Sidecar"):
+        return True
+    
+    node = item.get("node") or {}
+    if isinstance(node, dict):
+        if any(k in node for k in ("shortcode", "taken_at_timestamp", "edge_media_to_caption")):
+            return True
+    
+    return False
+
+def _ig_to_post_from_node(node: Dict, username_hint: Optional[str]) -> Dict:
+    """Convierte nodo de GraphQL a formato post"""
+    caption_edges = (node.get("edge_media_to_caption") or {}).get("edges") or []
+    caption_text = caption_edges[0].get("node", {}).get("text") if caption_edges else None
+    
+    return {
+        "shortCode": node.get("shortcode") or node.get("code"),
+        "caption": caption_text,
+        "takenAtTimestamp": node.get("taken_at_timestamp") or node.get("takenAtTimestamp") or node.get("date"),
+        "likesCount": (node.get("edge_liked_by") or {}).get("count") or node.get("like_count"),
+        "commentsCount": (node.get("edge_media_to_comment") or {}).get("count") or node.get("comment_count"),
+        "videoPlayCount": node.get("video_view_count") or node.get("view_count"),
+        "ownerUsername": username_hint,
+    }
+
+def _ig_extract_posts_recursive(obj: Any, username_hint: Optional[str], out_list: List):
+    """Extrae posts recursivamente de estructuras anidadas"""
+    if obj is None:
+        return
+    
+    if isinstance(obj, list):
+        for it in obj:
+            _ig_extract_posts_recursive(it, username_hint, out_list)
+        return
+    
+    if isinstance(obj, dict):
+        if _ig_is_post(obj):
+            if "node" in obj and isinstance(obj["node"], dict):
+                out_list.append(_ig_to_post_from_node(obj["node"], username_hint))
+            else:
+                if not obj.get("ownerUsername"):
+                    obj["ownerUsername"] = obj.get("username") or username_hint
+                if "code" in obj and "shortCode" not in obj:
+                    obj["shortCode"] = obj.get("code")
+                out_list.append(obj)
+        
+        for key in ("posts", "lastPosts", "recentPosts", "items", "edges", "nodes", "media", "feed", "timeline", "timelineMedia", "edge_owner_to_timeline_media", "graphql", "user", "edge_felix_video_timeline", "edge_web_feed_timeline"):
+            v = obj.get(key)
+            if key == "graphql" and isinstance(v, dict):
+                v = v.get("user")
+            if key in ("edge_owner_to_timeline_media", "edge_felix_video_timeline", "edge_web_feed_timeline"):
+                if isinstance(v, dict):
+                    v = v.get("edges")
+            _ig_extract_posts_recursive(v, username_hint, out_list)
+
+def _ig_extract_posts_from_profile_items(items: List[Dict], username_hint: Optional[str] = None) -> List[Dict]:
+    """Extrae posts de perfiles/estructuras anidadas con deduplicación"""
+    out: List[Dict] = []
+    _ig_extract_posts_recursive(items, username_hint, out)
+    
+    seen = set()
+    uniq = []
+    for it in out:
+        key = it.get("shortCode") or it.get("id") or it.get("url")
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(it)
+    
+    return uniq
+
+def fetch_instagram_hashtags(apify_token: str, hashtags: List[str], limit: int) -> pd.DataFrame:
+    """Obtiene posts de Instagram por hashtags"""
+    payload = {"hashtags": hashtags, "resultsType": "posts", "resultsLimit": limit}
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="apify/instagram-hashtag-scraper",
+        token=apify_token,
+        payload=payload,
+        limit=limit
+    )
+    items = _ig_extract_posts_from_profile_items(items, username_hint=None)
+    return normalize_common(items, "instagram")
+
+def fetch_instagram_user_posts(apify_token: str, usernames: List[str], limit: int) -> pd.DataFrame:
+    """Obtiene posts de usuarios de Instagram con múltiples estrategias"""
+    users = [u for u in (usernames or []) if u]
+    
+    if not users:
+        return pd.DataFrame()
+    
+    per_user = max(1, int(limit / max(1, len(users))))
+    acc: List[Dict] = []
+    
+    for u in users:
+        log_message(f"Procesando usuario IG: @{u}")
+        posts: List[Dict] = []
+        
+        variants = [
+            {"username": u, "resultsType": "posts", "resultsLimit": per_user, "maxItems": per_user},
+            {"usernames": [u], "resultsType": "posts", "resultsLimit": per_user, "maxItems": per_user},
+            {"directUrls": [f"https://www.instagram.com/{u}/"], "resultsType": "posts", "resultsLimit": per_user, "maxItems": per_user},
+        ]
+        
+        for i, payload in enumerate(variants, 1):
+            try:
+                log_message(f"Intentando post-scraper variante {i}/3 para @{u}")
+                items = apify_run_sync_items("apify/instagram-post-scraper", apify_token, payload, limit=per_user)
+                posts = _ig_extract_posts_from_profile_items(items, username_hint=u)
+                if posts:
+                    log_message(f"✓ Obtenidos {len(posts)} posts con variante {i}")
+                    break
+            except Exception as e:
+                log_message(f"Variante {i} falló: {e}", "warning")
+        
+        if not posts:
+            try:
+                log_message(f"Fallback a profile-scraper para @{u}")
+                payload_profile = {"usernames": [u], "resultsType": "posts", "resultsLimit": per_user}
+                items = apify_run_sync_items("apify/instagram-profile-scraper", apify_token, payload_profile, limit=per_user)
+                posts = _ig_extract_posts_from_profile_items(items, username_hint=u)
+                if posts:
+                    log_message(f"✓ Obtenidos {len(posts)} posts con profile-scraper")
+            except Exception as e:
+                log_message(f"Profile-scraper falló: {e}", "error")
+        
+        for p in posts:
+            p["ownerUsername"] = p.get("ownerUsername") or u
+        
+        acc.extend(posts)
+    
+    return normalize_common(acc, "instagram")
+
+# ============================================================================
+# TIKTOK
+# ============================================================================
+
+def fetch_tiktok_hashtags(apify_token: str, hashtags: List[str], limit: int) -> pd.DataFrame:
+    """Obtiene videos de TikTok por hashtags"""
+    payload = {
+        "hashtags": hashtags,
+        "resultsPerPage": 100,
+        "shouldDownloadVideos": False
+    }
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="clockworks/tiktok-scraper",
+        token=apify_token,
+        payload=payload,
+        limit=limit
+    )
+    return normalize_common(items, "tiktok")
+
+def fetch_tiktok_user_posts(apify_token: str, usernames: List[str], limit: int) -> pd.DataFrame:
+    """Obtiene videos de usuarios de TikTok"""
+    payload = {
+        "usernames": usernames,
+        "resultsPerPage": 100,
+        "shouldDownloadVideos": False
+    }
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="clockworks/tiktok-scraper",
+        token=apify_token,
+        payload=payload,
+        limit=limit
+    )
+    return normalize_common(items, "tiktok")
+
+# ============================================================================
+# FACEBOOK
+# ============================================================================
+
+def resolve_facebook_start_urls(apify_token: str, raw_input: str) -> List[Dict]:
+    """Resuelve usernames/búsquedas a URLs de Facebook"""
+    start_urls = []
+    
+    for piece in [p.strip() for p in re.split(r"[ ,]+", raw_input or "") if p.strip()]:
+        if piece.startswith("http://") or piece.startswith("https://"):
+            start_urls.append({"url": piece})
+            continue
+        
+        if " " not in piece:
+            start_urls.append({"url": f"https://www.facebook.com/{piece}"})
+            continue
+        
+        try:
+            log_message(f"Buscando página de Facebook: '{piece}'")
+            search_payload = {
+                "query": piece,
+                "search_type": "pages",
+                "max_pages": 1,
+                "recent_posts": True
+            }
+            items = apify_run_sync_items("danek/facebook-search-ppr", apify_token, search_payload, limit=1)
+            
+            if isinstance(items, list) and items:
+                cand = items[0]
+                for key in ("url", "pageUrl", "pageURL", "pageLink"):
+                    if key in cand and str(cand[key]).startswith("http"):
+                        start_urls.append({"url": str(cand[key])})
+                        log_message(f"✓ Encontrada: {cand[key]}")
+                        break
+        except Exception as e:
+            log_message(f"No se pudo resolver '{piece}': {e}", "warning")
+    
+    return start_urls
+
+def fetch_facebook_search(apify_token: str, query: str, d1: Optional[date],
+                          d2: Optional[date], limit: int) -> pd.DataFrame:
+    """Busca posts de Facebook por query"""
+    payload = {
+        "query": query,
+        "search_type": "posts",
+        "max_posts": int(limit),
+        "recent_posts": True
+    }
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="danek/facebook-search-ppr",
+        token=apify_token,
+        payload=payload,
+        limit=limit
+    )
+    df = normalize_common(items, "facebook")
+    return enforce_date_window(df, d1, d2)
+
+def fetch_facebook_user_posts(apify_token: str, usernames: List[str], limit: int) -> pd.DataFrame:
+    """Obtiene posts de páginas/perfiles de Facebook"""
+    raw = ", ".join(usernames)
+    start_urls = resolve_facebook_start_urls(apify_token, raw)
+    
+    if not start_urls:
+        raise RuntimeError("No se pudo resolver el/los usuarios de Facebook a URL de página/perfil.")
+    
+    payload = {"startUrls": start_urls, "maxPosts": int(limit)}
+    items = retry_on_failure(
+        apify_run_sync_items,
+        actor_id="apify/facebook-posts-scraper",
+        token=apify_token,
+        payload=payload,
+        limit=limit
+    )
+    return normalize_common(items, "facebook")
+
+# ============================================================================
+# INTERFAZ STREAMLIT
 # ============================================================================
 
 st.title("📡 Social Listening Pro — X + Instagram + Facebook + TikTok")
-st.markdown("**Análisis avanzado con detección de crisis, sentimiento y reporte por email**")
+st.markdown("**Análisis avanzado de redes sociales con valorización USD**")
 
-st.sidebar.header("⚙️ Configuración")
-
-st.sidebar.markdown("---")
-debug_mode = st.sidebar.checkbox(
-    "🐛 **Modo Debug**",
-    value=st.session_state.get("debug_mode", False),
-    key="toggle_debug_mode"
-)
-st.session_state["debug_mode"] = debug_mode
-if debug_mode:
-    st.sidebar.info("⚠️ Modo Debug activo. Ver panel abajo.")
-st.sidebar.markdown("---")
-
-platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
-
-if platform == "Instagram":
-    search_mode = st.sidebar.radio("Modo", ["Por temática (hashtags)", "Por temática (búsqueda IG)", "Por usuario"])
-elif platform == "Facebook":
-    search_mode = st.sidebar.radio("Modo", ["Por temática", "Por usuario"])
-else:
-    search_mode = st.sidebar.radio("Modo", ["Por temática", "Por usuario"])
-
-topic = ""
-username_input = ""
-hashtags_str = ""
-
-if search_mode.startswith("Por temática"):
-    if platform == "Instagram" and "hashtags" in search_mode:
-        hashtags_str = st.sidebar.text_input("Hashtag(s) (sin #, separado por comas)")
+# SIDEBAR
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    
+    platform = st.selectbox(
+        "Plataforma",
+        ["X (Twitter)", "Instagram", "Facebook", "TikTok"],
+        index=0
+    )
+    
+    api_x = st.text_input(
+        "API Key twitterapi.io (X)",
+        value=(env("TWITTERAPI_IO_KEY") or ""),
+        type="password"
+    )
+    
+    api_apify = st.text_input(
+        "APIFY_TOKEN (Apify)",
+        value=(env("APIFY_TOKEN") or ""),
+        type="password"
+    )
+    
+    st.divider()
+    
+    search_mode = st.radio(
+        "Modo de búsqueda",
+        ["Por temática", "Por usuario"],
+        horizontal=True,
+        index=0
+    )
+    
+    if search_mode == "Por temática":
+        topic = st.text_area(
+            "Tema / consulta (X/FB)",
+            value=st.session_state["params"].get("topic", "inteligencia artificial Chile"),
+            height=80,
+            help="Para X: usa operadores booleanos (AND, OR, -)"
+        )
+        hashtags_str = st.text_input(
+            "Hashtags (IG/TikTok) sin #, separados por espacio/coma",
+            value=st.session_state["params"].get("hashtags_str", "machinelearning datascience"),
+            help="Ejemplo: machinelearning, datascience, chile"
+        )
     else:
-        topic = st.sidebar.text_input("Tema / consulta")
-else:
-    username_input = st.sidebar.text_input("Usuario(s) (separar por coma)")
-
-lang = st.sidebar.selectbox("Idioma (solo X)", ["", "es", "en", "pt"], index=1)
-col1, col2 = st.sidebar.columns(2)
-exclude_rt = col1.checkbox("Excluir RTs [X]", value=True)
-exclude_repl = col2.checkbox("Excluir respuestas [X]", value=True)
-filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo Chile (X)")
-
-st.sidebar.divider()
-
-current_date_cl = datetime.now(SCL_TZ).date()
-default_start = current_date_cl - timedelta(days=14)
-
-d1 = st.sidebar.date_input("Desde", value=default_start, max_value=current_date_cl, key="date_input_from")
-d2 = st.sidebar.date_input("Hasta", value=current_date_cl, max_value=current_date_cl, min_value=d1 if d1 else None, key="date_input_to")
-
-if d1 and d2 and d1 > d2:
-    st.sidebar.error("⚠️ Fecha 'Desde' no puede ser posterior a 'Hasta'")
-
-limit = st.sidebar.slider("Límite de posts", 50, 2000, 200)
-max_words = st.sidebar.slider("Máx. palabras nube", 50, 500, 200)
-
-sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
-emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
-
-st.sidebar.divider()
-
-st.sidebar.subheader("🔑 Credenciales API")
-
-env_x = env("TWITTERAPI_IO_KEY")
-if env_x:
-    api_x = env_x
-    st.sidebar.success("✅ X API cargada desde .env")
-else:
-    api_x = st.sidebar.text_input("API Key twitterapi.io", type="password", key="manual_api_x", help="Ingresa tu API Key de twitterapi.io")
-    if api_x:
-        st.sidebar.success("✅ X API ingresada")
+        username_input = st.text_input(
+            "Usuario(s) / URL(s) (coma o espacio)",
+            value=st.session_state["params"].get("username", ""),
+            help="Ejemplo: @usuario, url_completa, o múltiples separados por coma"
+        )
+    
+    st.divider()
+    
+    lang = st.selectbox(
+        "Idioma (solo X)",
+        ["", "es", "en", "pt"],
+        index={"": 0, "es": 1, "en": 2, "pt": 3}.get(st.session_state["params"].get("lang", "es"), 1)
+    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        exclude_rt = st.checkbox(
+            "Excluir RTs [X]",
+            value=st.session_state["params"].get("exclude_rt", True)
+        )
+    with col2:
+        exclude_repl = st.checkbox(
+            "Excluir respuestas [X]",
+            value=st.session_state["params"].get("exclude_repl", True)
+        )
+    
+    st.divider()
+    
+    today = datetime.now(SCL_TZ).date()
+    d1_default = st.session_state["params"].get("d1", today - timedelta(days=14))
+    d2_default = st.session_state["params"].get("d2", today)
+    
+    date_range = st.date_input(
+        "Rango de fechas (CL)",
+        value=(d1_default, d2_default),
+        help="Fechas en zona horaria de Chile"
+    )
+    
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        d1, d2 = date_range
     else:
-        st.sidebar.warning("⚠️ X API no configurada")
+        d1, d2 = date_range, date_range
+    
+    query_type = st.selectbox(
+        "Orden (X)",
+        ["Latest", "Top"],
+        index=0 if st.session_state["params"].get("query_type", "Latest") == "Latest" else 1
+    )
+    
+    limit = st.slider("Límite de posts", 50, 5000, st.session_state["params"].get("limit", 300), 50)
+    
+    max_words = st.slider("Máx. palabras nube", 50, 500, st.session_state["params"].get("max_words", 200), 25)
+    
+    sentiment = st.checkbox(
+        "Analizar sentimiento (español)",
+        value=st.session_state["params"].get("sentiment", True),
+        help="Usa pysentimiento para análisis de sentimiento"
+    )
+    
+    debug = st.checkbox("🔧 Modo debug", value=False)
+    st.session_state["debug_mode"] = debug
+    
+    st.divider()
+    
+    col_run, col_clear = st.columns(2)
+    with col_run:
+        run_btn = st.button("🔍 Buscar", type="primary", use_container_width=True)
+    with col_clear:
+        clear_btn = st.button("🧹 Limpiar", use_container_width=True)
+    
+    # PREVIEW
+    with st.expander("🔎 Vista previa de consulta"):
+        if platform.startswith("X"):
+            if search_mode == "Por usuario":
+                u = username_input if 'username_input' in locals() else st.session_state["params"].get("username", "")
+                preview_query = compose_query_x_user(u, lang, exclude_rt, exclude_repl, d1, d2)
+            else:
+                t = topic if 'topic' in locals() else st.session_state["params"].get("topic", "")
+                preview_query = compose_query_x(t, lang, exclude_rt, exclude_repl, d1, d2)
+            st.code(preview_query, language="text")
+        elif platform == "Instagram":
+            st.info(f"IG → {'Perfiles: ' + username_input if search_mode == 'Por usuario' else 'Hashtags: ' + hashtags_str}")
+        elif platform == "TikTok":
+            st.info(f"TikTok → {'Perfiles: ' + username_input if search_mode == 'Por usuario' else 'Hashtags: ' + hashtags_str}")
+        elif platform == "Facebook":
+            st.info(f"FB → {'Páginas/perfiles: ' + username_input if search_mode == 'Por usuario' else 'Búsqueda: ' + topic}")
 
-env_apify = env("APIFY_TOKEN")
-if env_apify:
-    api_apify = env_apify
-    st.sidebar.success("✅ Apify Token cargado desde .env")
-else:
-    api_apify = st.sidebar.text_input("Token Apify", type="password", key="manual_api_apify", help="Ingresa tu token de Apify")
-    if api_apify:
-        st.sidebar.success("✅ Apify Token ingresado")
-    else:
-        st.sidebar.warning("⚠️ Apify Token no configurado")
-
-st.sidebar.divider()
-
-run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
-
-if debug_mode:
-    render_debug_panel()
+# CLEAR
+if clear_btn:
+    st.session_state["df"] = None
+    st.session_state["params"] = {}
+    st.session_state["query_str"] = None
+    st.session_state["logs"] = []
+    st.rerun()
 
 # ============================================================================
-# EJECUCIÓN
+# EJECUCIÓN DE BÚSQUEDA
 # ============================================================================
 
 if run_btn:
     st.session_state["logs"] = []
-    st.session_state["debug_logs"] = []
-    st.session_state["execution_times"] = {}
-    st.session_state["api_responses"] = {}
-    st.session_state["report_figures"] = {}
-    st.session_state["ai_summary"] = None
-
-    log_message("🚀 Iniciando búsqueda", "info")
-    prog = st.progress(0.0, text="Iniciando...")
-    df = pd.DataFrame()
-    tokens = [t for t in [api_apify] if t]
-
+    prog = st.progress(0.0, text="Iniciando búsqueda...")
+    
     try:
-        prog.progress(0.1, text="Obteniendo datos...")
-
+        # X / TWITTER
         if platform.startswith("X"):
             if not api_x:
-                st.error("❌ Falta API Key X. Ingresa las credenciales en el sidebar.")
-                log_message("API Key X no configurada", "error")
+                st.error("❌ Falta API Key de twitterapi.io")
                 st.stop()
-            if "usuario" in search_mode:
-                q = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
+            
+            if search_mode == "Por usuario":
+                if not username_input.strip():
+                    st.error("❌ Ingresa al menos un usuario")
+                    st.stop()
+                qx = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2)
             else:
-                q = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
-            df = fetch_x_cached(api_x, q, limit)
-
-        elif platform == "Facebook":
-            if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
-                st.stop()
-            mode = "user" if "usuario" in search_mode else "search"
-            q = username_input if mode == "user" else topic
-            df = fetch_facebook_cached(tokens, q, limit, mode)
-
-        elif platform == "Instagram":
-            if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
-                st.stop()
-            mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
-            q = hashtags_str if mode == "hashtag" else (username_input if mode == "user" else topic)
-            df = fetch_instagram_cached(tokens, q, limit, mode)
-
-        elif platform == "TikTok":
-            if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
-                st.stop()
-            mode = "user" if "usuario" in search_mode else "hashtag"
-            q = username_input if mode == "user" else topic
-            df = fetch_tiktok_cached(tokens, q, limit, mode)
-
-        prog.progress(0.3, text="Aplicando filtros de fecha...")
-
-        try:
-            df = enforce_date_window(df, d1, d2)
-        except Exception as date_error:
-            log_message(
-                f"Error al filtrar fechas: {date_error}",
-                "error",
-                {"d1": str(d1), "d2": str(d2), "traceback": traceback.format_exc()}
+                if not (topic and topic.strip()):
+                    st.error("❌ Ingresa un tema de búsqueda")
+                    st.stop()
+                qx = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2)
+            
+            df = fetch_x(
+                api_x, qx,
+                query_type=query_type,
+                limit=limit,
+                sleep_s=5.2,
+                progress_cb=lambda x: prog.progress(x, text=f"Obteniendo tweets... {int(x*100)}%")
             )
-            st.warning("⚠️ No se pudo aplicar el filtro de fechas. Mostrando todos los resultados.")
-
-        prog.progress(0.4, text="Verificando datos...")
-
-        if df.empty:
-            st.warning("No se encontraron resultados.")
-            log_message("Búsqueda sin resultados", "warning")
+            
+            df = enforce_date_window(df, d1, d2)
+            st.session_state["query_str"] = qx
+        
+        # INSTAGRAM
+        elif platform == "Instagram":
+            if not api_apify:
+                st.error("❌ Falta APIFY_TOKEN")
+                st.stop()
+            
+            if search_mode == "Por usuario":
+                users = parse_instagram_usernames(username_input)
+                if not users:
+                    st.error("❌ Ingresa usuario(s) o URL(s) de Instagram")
+                    st.stop()
+                prog.progress(0.1, text=f"Procesando {len(users)} usuario(s)...")
+                df = fetch_instagram_user_posts(api_apify, users, limit)
+            else:
+                tags = [t.strip().lstrip("#") for t in re.split(r"[ ,]+", hashtags_str or "") if t.strip()]
+                if not tags:
+                    st.error("❌ Ingresa al menos un hashtag")
+                    st.stop()
+                prog.progress(0.1, text=f"Buscando {len(tags)} hashtag(s)...")
+                df = fetch_instagram_hashtags(api_apify, tags, limit)
+            
+            df = enforce_date_window(df, d1, d2)
+            st.session_state["query_str"] = f"IG {'users' if search_mode=='Por usuario' else 'hashtags'}"
+        
+        # TIKTOK
+        elif platform == "TikTok":
+            if not api_apify:
+                st.error("❌ Falta APIFY_TOKEN")
+                st.stop()
+            
+            if search_mode == "Por usuario":
+                users = [u.strip().lstrip("@") for u in re.split(r"[ ,]+", username_input or "") if u.strip()]
+                if not users:
+                    st.error("❌ Ingresa al menos un usuario")
+                    st.stop()
+                prog.progress(0.1, text=f"Procesando {len(users)} usuario(s)...")
+                df = fetch_tiktok_user_posts(api_apify, users, limit)
+            else:
+                tags = [t.strip().lstrip("#") for t in re.split(r"[ ,]+", hashtags_str or "") if t.strip()]
+                if not tags:
+                    st.error("❌ Ingresa al menos un hashtag")
+                    st.stop()
+                prog.progress(0.1, text=f"Buscando {len(tags)} hashtag(s)...")
+                df = fetch_tiktok_hashtags(api_apify, tags, limit)
+            
+            df = enforce_date_window(df, d1, d2)
+            st.session_state["query_str"] = f"TikTok {'users' if search_mode=='Por usuario' else 'hashtags'}"
+        
+        # FACEBOOK
+        elif platform == "Facebook":
+            if not api_apify:
+                st.error("❌ Falta APIFY_TOKEN")
+                st.stop()
+            
+            if search_mode == "Por usuario":
+                users = [u.strip() for u in re.split(r"[ ,]+", username_input or "") if u.strip()]
+                if not users:
+                    st.error("❌ Ingresa al menos un usuario o URL")
+                    st.stop()
+                prog.progress(0.1, text="Resolviendo páginas de Facebook...")
+                df = fetch_facebook_user_posts(api_apify, users, limit)
+                df = enforce_date_window(df, d1, d2)
+                st.session_state["query_str"] = f"FB user posts {users}"
+            else:
+                if not (topic and topic.strip()):
+                    st.error("❌ Ingresa un tema de búsqueda")
+                    st.stop()
+                prog.progress(0.1, text="Buscando en Facebook...")
+                df = fetch_facebook_search(api_apify, topic, d1, d2, limit)
+                st.session_state["query_str"] = f"FB search='{topic}'"
+        
+        else:
+            st.error("❌ Plataforma no soportada")
             st.stop()
-
-        log_message(f"✅ Obtenidos {len(df)} posts", "info")
-
-        prog.progress(0.5, text="Procesando IA...")
-
-        if "text" in df.columns:
-            texts = df["text"].tolist()
-
-            if sentiment:
-                prog.progress(0.6, text="Analizando sentimiento...")
-                with st.spinner("DeepSeek Sentimiento..."):
-                    df["sentiment"] = analyze_sentiment_deepseek_optimized(texts)
-
-            if emotions:
-                prog.progress(0.7, text="Analizando emociones...")
-                with st.spinner("DeepSeek Emociones..."):
-                    df["emotion"] = analyze_emotions_deepseek_optimized(texts)
-
-            prog.progress(0.8, text="Generando resumen ejecutivo...")
-            with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
-                query_context = topic or username_input or hashtags_str
-                summary = generate_executive_summary(df, query_context)
-                st.session_state["ai_summary"] = summary
-
-        prog.progress(1.0, text="✅ Listo")
-        st.session_state["df"] = df
-        log_message("✅ Proceso completado exitosamente", "info")
-
-    except Exception as e:
-        st.error(f"Error crítico: {e}")
-        log_message(str(e), "error", {"traceback": traceback.format_exc()})
-        if st.session_state.get("debug_mode"):
-            st.exception(e)
-    finally:
+        
         prog.empty()
+        
+        # Resultados
+        if df is None or df.empty:
+            st.warning("⚠️ No se encontraron resultados con los parámetros especificados")
+            st.stop()
+        
+        else:
+            # 💰 CALCULAR VALORIZACIÓN EN DÓLARES
+            if not df.empty and 'likes' in df.columns:
+                prog.progress(0.50, text="💰 Calculando valorización USD...")
+                
+                df = calculate_post_value_usd(
+                    df, 
+                    platform=platform,
+                )
+                
+                log_message(f"✅ Valorización USD completada para {platform}", "info")
+            
+            st.session_state["df"] = df
+            st.session_state["params"] = {
+                "platform": platform,
+                "search_mode": search_mode,
+                "topic": (topic if 'topic' in locals() else st.session_state["params"].get("topic")),
+                "username": (username_input if 'username_input' in locals() else st.session_state["params"].get("username")),
+                "lang": lang,
+                "exclude_rt": exclude_rt,
+                "exclude_repl": exclude_repl,
+                "d1": d1,
+                "d2": d2,
+                "query_type": query_type,
+                "limit": limit,
+                "hashtags_str": (hashtags_str if 'hashtags_str' in locals() else st.session_state["params"].get("hashtags_str")),
+                "sentiment": sentiment,
+                "max_words": max_words,
+            }
+            
+            st.success(f"✅ Se obtuvieron {len(df)} registros")
+            
+            if debug:
+                st.write("🔧 Debug - Primeros 3 registros:")
+                st.dataframe(df.head(3))
+    
+    except Exception as e:
+        prog.empty()
+        st.error(f"❌ Error durante la búsqueda: {str(e)}")
+        log_message(f"Error crítico: {e}", "error")
+        if debug:
+            import traceback
+            st.code(traceback.format_exc())
+        st.stop()
 
 # ============================================================================
-# VISUALIZACIÓN & REPORTE
+# RENDERIZADO DE RESULTADOS
 # ============================================================================
 
 df = st.session_state.get("df")
-ai_summary = st.session_state.get("ai_summary")
 
 if df is not None and not df.empty:
-
-    if ai_summary:
-        st.info(f"🤖 **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
-
-    crisis_data = detect_crisis_signals(df)
-    if crisis_data["score"] > 0:
-        c_color = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(crisis_data["severity"],"⚪")
-        st.header(f"{c_color} Alerta de Crisis")
-        col1, col2 = st.columns([1,3])
-        col1.metric("Score Crisis", f"{crisis_data['score']}/100")
-        with col2:
-            for s in crisis_data["signals"]:
-                st.write(f"• {s}")
-
-        if not crisis_data["crisis_posts"].empty:
-            st.warning("⚠️ Se han detectado los siguientes posts conflictivos:")
-            cols_to_show = ["created_at", "username", "text", "likes", "url"]
-            cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
-            st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
-
-            # ✅ FIX: Excel-safe export always
-            try:
-                crisis_xlsx = df_to_excel_bytes(crisis_data["crisis_posts"])
-                st.download_button(
-                    label="📥 Descargar Posts de Crisis (Excel)",
-                    data=crisis_xlsx,
-                    file_name="reporte_crisis.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="btn_download_crisis"
-                )
-            except Exception as e:
-                log_message(f"Error exportando crisis_posts a Excel: {e}", "error", {"traceback": traceback.format_exc()})
-                st.error("❌ No se pudo generar el Excel de crisis. Revisa debug logs.")
-        st.divider()
-
-    st.header("📈 Dashboard")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Posts", len(df))
-    k2.metric("Likes", int(df["likes"].sum()) if "likes" in df.columns else 0)
-    k3.metric("Comentarios", int(df["comments"].sum()) if "comments" in df.columns else 0)
-    k4.metric("Vistas", int(df["views"].sum()) if "views" in df.columns else 0)
-
+    
+    # MÉTRICAS RESUMEN
+    total = len(df)
+    likes = int(df.get("likes", pd.Series(dtype="float")).fillna(0).sum())
+    shares = int(df.get("shares", pd.Series(dtype="float")).fillna(0).sum())
+    comments = int(df.get("comments", pd.Series(dtype="float")).fillna(0).sum())
+    views = int(df.get("views", pd.Series(dtype="float")).fillna(0).sum()) if "views" in df.columns else 0
+    users = df["username"].nunique() if "username" in df.columns else 0
+    total_usd = df['post_value_usd'].sum() if 'post_value_usd' in df.columns else 0
+    
+    st.header("📈 Resumen de métricas")
+    
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    
+    k1.metric("📊 Posts", f"{total:,}")
+    k2.metric("👥 Usuarios", f"{users:,}")
+    k3.metric("❤️ Likes", f"{likes:,}")
+    k4.metric("🔄 Shares", f"{shares:,}")
+    k5.metric("💬 Comentarios", f"{comments:,}")
+    k6.metric("💰 Valor USD", f"${total_usd:,.2f}")
+    
+    # VISUALIZACIONES
     st.header("📊 Visualizaciones")
-    tabs = st.tabs(["📅 Temporal", "🧠 Sentimiento", "🎭 Emociones", "🏷️ Temas", "☁️ Nube"])
-    current_figures = {}
-
-    with tabs[0]:
-        if "fecha_cl" in df.columns:
-            by_day = df["fecha_cl"].value_counts().sort_index()
-            if not by_day.empty:
-                fig, ax = plt.subplots(figsize=(10,4))
-                dates_str = [str(d) for d in by_day.index]
-                ax.bar(dates_str, by_day.values, color="#2ca02c")
-                ax.set_title("Evolución diaria")
-                plt.xticks(rotation=45)
-                st.pyplot(fig)
-                current_figures["evolucion"] = fig_to_bytes(fig)
-                plt.close(fig)
-
-    with tabs[1]:
-        if "sentiment" in df.columns:
-            c1, c2 = st.columns(2)
-            with c1:
-                fig1 = plot_pie_chart(df["sentiment"], "Distribución Sentimiento")
-                if fig1:
-                    st.pyplot(fig1)
-                    current_figures["sentimiento_pie"] = fig_to_bytes(fig1)
-                    plt.close(fig1)
-            with c2:
-                fig2 = plot_bar_chart(df["sentiment"], "Conteo Sentimiento", "#2ecc71")
-                if fig2:
-                    st.pyplot(fig2)
-                    current_figures["sentimiento_bar"] = fig_to_bytes(fig2)
-                    plt.close(fig2)
-
-    with tabs[2]:
-        if "emotion" in df.columns:
-            c1, c2 = st.columns(2)
-            with c1:
-                fig3 = plot_pie_chart(df["emotion"], "Distribución Emociones")
-                if fig3:
-                    st.pyplot(fig3)
-                    current_figures["emociones_pie"] = fig_to_bytes(fig3)
-                    plt.close(fig3)
-            with c2:
-                fig4 = plot_bar_chart(df["emotion"], "Conteo Emociones", "#9b59b6")
-                if fig4:
-                    st.pyplot(fig4)
-                    current_figures["emociones_bar"] = fig_to_bytes(fig4)
-                    plt.close(fig4)
-
-    with tabs[3]:
+    
+    viz_tabs = st.tabs(["📅 Temporal", "😊 Sentimiento", "☁️ Nube de palabras", "💰 Valorización USD"])
+    
+    # Tab 1: Temporal
+    with viz_tabs[0]:
+        if "created_at_cl" in df.columns and df["created_at_cl"].notna().any():
+            col_hour, col_day = st.columns(2)
+            
+            with col_hour:
+                st.subheader("Posts por hora del día")
+                by_hour = df["created_at_cl"].dt.hour.value_counts().sort_index().rename("posts")
+                fig1, ax1 = plt.subplots(figsize=(8, 4))
+                ax1.plot(by_hour.index, by_hour.values, marker="o", linewidth=2, color="#1f77b4")
+                ax1.set_xlabel("Hora (Chile)", fontsize=11)
+                ax1.set_ylabel("Cantidad de posts", fontsize=11)
+                ax1.set_title("Distribución horaria de posts", fontsize=12, fontweight="bold")
+                ax1.grid(True, alpha=0.3, linestyle="--")
+                ax1.set_xticks(range(0, 24, 2))
+                plt.tight_layout()
+                st.pyplot(fig1)
+                plt.close()
+            
+            with col_day:
+                st.subheader("Posts por día")
+                df_valid = df[df["created_at_cl"].notna()].copy()
+                if not df_valid.empty:
+                    df_valid["fecha_cl"] = floor_day_local_safe(df_valid["created_at_cl"])
+                    by_day = df_valid.groupby("fecha_cl").size().rename("posts").sort_index()
+                    
+                    if not by_day.empty:
+                        if len(by_day) > 90:
+                            by_day = by_day.iloc[-90:]
+                        
+                        idx = pd.date_range(start=by_day.index.min(), end=by_day.index.max(), freq="D")
+                        by_day = by_day.reindex(idx, fill_value=0)
+                        
+                        fig2, ax2 = plt.subplots(figsize=(8, 4))
+                        ax2.bar(range(len(by_day)), by_day.values, color="#2ca02c", alpha=0.7)
+                        ax2.set_xlabel("Fecha (Chile)", fontsize=11)
+                        ax2.set_ylabel("Cantidad de posts", fontsize=11)
+                        ax2.set_title("Evolución diaria de posts", fontsize=12, fontweight="bold")
+                        
+                        step = max(1, len(by_day) // 10)
+                        xticks_pos = range(0, len(by_day), step)
+                        xticks_labels = [by_day.index[i].strftime("%d/%m") for i in xticks_pos]
+                        ax2.set_xticks(xticks_pos)
+                        ax2.set_xticklabels(xticks_labels, rotation=45, ha="right")
+                        ax2.grid(True, alpha=0.3, axis="y", linestyle="--")
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig2)
+                        plt.close()
+        else:
+            st.info("ℹ️ No hay suficientes datos temporales para visualizar")
+    
+    # Tab 2: Sentimiento
+    with viz_tabs[1]:
+        if "sentiment" in df.columns and df["sentiment"].notna().any():
+            col_pie, col_bar = st.columns([1, 1])
+            
+            with col_pie:
+                st.subheader("Distribución de sentimiento")
+                dist = df["sentiment"].dropna().value_counts()
+                fig3, ax3 = plt.subplots(figsize=(6, 6))
+                colors = {"POS": "#2ecc71", "NEG": "#e74c3c", "NEU": "#95a5a6"}
+                pie_colors = [colors.get(label, "#3498db") for label in dist.index]
+                ax3.pie(
+                    dist.values,
+                    labels=dist.index,
+                    autopct="%1.1f%%",
+                    startangle=90,
+                    colors=pie_colors,
+                    textprops={"fontsize": 11}
+                )
+                ax3.set_title("Sentimiento de posts", fontsize=12, fontweight="bold")
+                ax3.axis("equal")
+                plt.tight_layout()
+                st.pyplot(fig3)
+                plt.close()
+            
+            with col_bar:
+                st.subheader("Conteo por sentimiento")
+                fig4, ax4 = plt.subplots(figsize=(6, 6))
+                colors_bar = [colors.get(label, "#3498db") for label in dist.index]
+                ax4.barh(dist.index, dist.values, color=colors_bar, alpha=0.8)
+                ax4.set_xlabel("Cantidad de posts", fontsize=11)
+                ax4.set_title("Posts por categoría de sentimiento", fontsize=12, fontweight="bold")
+                ax4.grid(True, alpha=0.3, axis="x", linestyle="--")
+                for i, (label, value) in enumerate(zip(dist.index, dist.values)):
+                    ax4.text(value + max(dist.values)*0.01, i, f"{value:,}", va="center", fontsize=10)
+                plt.tight_layout()
+                st.pyplot(fig4)
+                plt.close()
+        else:
+            st.info("ℹ️ No hay datos de sentimiento disponibles.")
+    
+    # Tab 3: Nube de palabras
+    with viz_tabs[2]:
         if "text" in df.columns:
-            topics = extract_topics(df["text"].tolist())
-            st.bar_chart(pd.Series(topics))
-            fig_t, ax_t = plt.subplots()
-            ax_t.bar(list(topics.keys()), list(topics.values()))
-            ax_t.set_title("Top Tópicos")
-            plt.xticks(rotation=45)
-            current_figures["top_topicos"] = fig_to_bytes(fig_t)
-            plt.close(fig_t)
+            st.subheader("Nube de palabras más frecuentes")
+            with st.spinner("Generando nube de palabras..."):
+                blob = clean_texts(df["text"])
+                wordcloud_from_blob(blob, max_words=st.session_state["params"].get("max_words", 200))
+        else:
+            st.info("ℹ️ No hay texto disponible para generar nube de palabras")
+    
+    # Tab 4: Valorización USD
+    with viz_tabs[3]:
+        if 'post_value_usd' in df.columns:
+            st.subheader("💰 Top 10 Posts Más Valiosos")
+            
+            top_valuable = df.nlargest(10, 'post_value_usd')[[
+                'created_at_cl', 'username', 'text', 'likes', 'shares', 'post_value_usd', 'post_value_category'
+            ]].copy()
+            
+            if 'text' in top_valuable.columns:
+                top_valuable['text'] = top_valuable['text'].astype(str).str[:50] + "..."
+            
+            st.dataframe(top_valuable, use_container_width=True, height=300)
+            
+            # Gráfico barras
+            fig_value, ax_value = plt.subplots(figsize=(12, 5))
+            top_10_values = top_valuable['post_value_usd'].values
+            top_10_usernames = top_valuable['username'].astype(str).str[:15].values
+            
+            ax_value.barh(range(len(top_10_values)), top_10_values, color='#2ecc71')
+            ax_value.set_yticks(range(len(top_10_values)))
+            ax_value.set_yticklabels(top_10_usernames)
+            ax_value.set_xlabel('Valor USD')
+            ax_value.set_title('Top 10 Posts Por Valor en Dólares')
+            ax_value.invert_yaxis()
+            
+            for i, v in enumerate(top_10_values):
+                ax_value.text(v + max(top_10_values)*0.01, i, f'${v:.2f}', va='center')
+            
+            st.pyplot(fig_value)
+            plt.close()
+        else:
+            st.info("ℹ️ No hay datos de valorización disponibles")
+    
+    # TABLA DE RESULTADOS
+    st.header("📋 Tabla de resultados")
+    
+    col_filter1, col_filter2 = st.columns(2)
+    
+    with col_filter1:
+        show_cols = st.multiselect(
+            "Columnas a mostrar",
+            options=df.columns.tolist(),
+            default=[c for c in ["platform", "created_at_cl", "username", "text", "likes", "shares", "comments", "post_value_usd"] if c in df.columns]
+        )
+    
+    with col_filter2:
+        sort_options = [c for c in ["created_at_cl", "likes", "shares", "comments", "views", "post_value_usd"] if c in df.columns]
+        if sort_options:
+            sort_by = st.selectbox(
+                "Ordenar por",
+                options=sort_options,
+                index=0
+            )
+        else:
+            sort_by = None
+    
+    if show_cols:
+        if sort_by:
+            df_display = df[show_cols].sort_values(by=sort_by, ascending=False)
+        else:
+            df_display = df[show_cols]
+        st.dataframe(df_display, use_container_width=True, height=400)
+    else:
+        st.dataframe(df, use_container_width=True, height=400)
+    
+    # EXPORTACIÓN
+    st.header("⬇️ Exportar resultados")
+    
+    col_exp1, col_exp2 = st.columns(2)
+    
+    with col_exp1:
+        csv_bytes = df_to_csv_bytes(df)
+        st.download_button(
+            label="📄 Descargar CSV",
+            data=csv_bytes,
+            file_name=f"social_listening_{platform.lower().replace(' ', '_')}_{datetime.now(SCL_TZ).strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    
+    with col_exp2:
+        excel_bytes = df_to_excel_bytes(df)
+        st.download_button(
+            label="📊 Descargar Excel",
+            data=excel_bytes,
+            file_name=f"social_listening_{platform.lower().replace(' ', '_')}_{datetime.now(SCL_TZ).strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    
+    # LOGS
+    if debug and st.session_state.get("logs"):
+        with st.expander("🔧 Logs de ejecución"):
+            for log in st.session_state["logs"]:
+                st.text(log)
 
-    with tabs[4]:
-        if "text" in df.columns:
-            blob = clean_texts(df["text"])
-            fig_wc = wordcloud_from_blob(blob, max_words=max_words)
-            if fig_wc:
-                st.pyplot(fig_wc)
-                current_figures["wordcloud"] = fig_to_bytes(fig_wc)
-                plt.close(fig_wc)
+else:
+    st.info("👋 Configura los parámetros en el panel lateral y pulsa **Buscar** para comenzar")
+    st.markdown("""
+    ### Características principales:
 
-    st.session_state["report_figures"] = current_figures
-    st.divider()
+    - **Múltiples plataformas**: X (Twitter), Instagram, Facebook, TikTok
+    - **Búsqueda flexible**: Por temática o por usuario/perfil
+    - **Análisis avanzado**: Sentimiento, tendencias temporales, nube de palabras
+    - **💰 Valorización USD**: Calcula automáticamente el valor de cada post
+    - **Exportación**: Descarga resultados en CSV o Excel
+    - **Manejo robusto de errores**: Reintentos automáticos y fallbacks
 
-    st.header("📧 Enviar Reporte")
-    with st.expander("Configuración de Envío", expanded=True):
-        email_to = st.text_input("Destinatario", placeholder="jp@empresa.com")
-        if st.button("Enviar Reporte Completo", use_container_width=True):
-            if not email_to:
-                st.error("Ingresa un correo.")
-            elif not st.session_state["report_figures"]:
-                st.warning("Genera gráficos primero.")
-            else:
-                with st.spinner("Enviando..."):
-                    query_val = topic or username_input or hashtags_str
-                    fecha_reporte = datetime.now(SCL_TZ).strftime('%d/%m/%Y %H:%M')
+    ### Consejos de uso:
 
-                    email_body = (
-                        f"REPORTE SOCIAL LISTENING PRO\n"
-                        f"============================\n"
-                        f"Fecha de generación: {fecha_reporte}\n"
-                        f"Plataforma: {platform}\n"
-                        f"Búsqueda: {query_val}\n\n"
-                        f"RESUMEN EJECUTIVO (IA):\n"
-                        f"{ai_summary if ai_summary else 'No disponible.'}\n\n"
-                        f"METRICAS GENERALES:\n"
-                        f"- Total Posts: {len(df)}\n"
-                        f"- Interacciones Totales: {int(df.get('likes',0).sum() + df.get('comments',0).sum())}\n"
-                        f"- Visualizaciones: {int(df.get('views',0).sum())}\n\n"
-                        f"Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
-                    )
+    1. **X/Twitter**: Usa operadores booleanos para búsquedas complejas (AND, OR, -)
+    2. **Instagram**: Puedes ingresar usernames o URLs completas
+    3. **Facebook**: Las búsquedas temáticas pueden tardar más tiempo
+    4. **Límites**: Ajusta según necesidad (más posts = más tiempo de procesamiento)
+    """)
 
-                    success, msg = send_email_report(
-                        email_to,
-                        f"Reporte: {platform} - {query_val}",
-                        email_body,
-                        df_to_excel_bytes(df),
-                        df_to_csv_bytes(df),
-                        st.session_state["report_figures"]
-                    )
-                    if success:
-                        st.success(f"✅ {msg}")
-                    else:
-                        st.error(f"❌ {msg}")
+st.divider()
 
-    c1, c2 = st.columns(2)
-    c1.download_button("📥 Excel", df_to_excel_bytes(df), "reporte.xlsx")
-    c2.download_button("📥 CSV", df_to_csv_bytes(df), "reporte.csv")
-
-# ============================================================================
-# FOOTER LOGS
-# ============================================================================
-
-if st.session_state.get("logs"):
-    with st.expander("📋 Logs de Ejecución", expanded=False):
-        for log in st.session_state["logs"][-50:]:
-            st.text(log)
+st.caption(f"Social Listening Pro • {BUILD_TAG} • Desarrollado para análisis profesional de redes sociales")
