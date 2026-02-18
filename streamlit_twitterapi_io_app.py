@@ -248,9 +248,25 @@ _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # --- FUNCIÓN RENOMBRADA PARA EVITAR EL NAME ERROR ---
 def limpiar_celda_excel(x: Any) -> str:
     """Limpia un valor individual para que Excel no falle."""
-    if x is None or pd.isna(x):
+    if x is None:
         return ""
-    
+
+    # pd.isna puede devolver arrays en valores no escalares; evaluamos de forma segura.
+    try:
+        na_flag = pd.isna(x)
+    except Exception:
+        na_flag = False
+
+    if isinstance(na_flag, bool):
+        if na_flag:
+            return ""
+    elif hasattr(na_flag, "all"):
+        try:
+            if na_flag.all():
+                return ""
+        except Exception:
+            pass
+
     # Si es diccionario o lista, a JSON string
     if isinstance(x, (dict, list, tuple, set)):
         try:
