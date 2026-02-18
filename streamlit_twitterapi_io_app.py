@@ -1,5 +1,5 @@
 # Streamlit Social Listening: X (twitterapi.io) + Instagram/Facebook/TikTok (Apify)
-# Optimizado por "JP" Persona - V6.8.1 (Excel-safe export fix + Missing CSV + Robust Sanitizer)
+# Optimizado por "JP" Persona - V6.8.2 (IG keyword fix + Excel export unificado + Sanitizer robusto)
 # UI: Español | Feat: Stealth Credentials + Email Reporting + AI Analyst (Specific Citations) + Debug Tools
 
 import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
@@ -28,7 +28,7 @@ import traceback
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="📡", layout="wide")
 
-BUILD_TAG = "JP Release v6.8.1 - Excel-safe export fix + CSV bytes + DEBUG MODE"
+BUILD_TAG = "JP Release v6.8.2 - IG keyword fix + Unified Excel/CSV export + Robust Sanitizer"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(
@@ -42,7 +42,7 @@ SCL_TZ = pytz.timezone("America/Santiago")
 API_URL_X = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 ASYNC_POLL_INTERVAL = 3
 
-load_dotenv()
+load_dotenv(override=True)
 
 # ============================================================================
 # SESSION STATE & UTILS (ENHANCED WITH DEBUG)
@@ -58,15 +58,17 @@ default_state = {
     "debug_mode": False,
     "debug_logs": [],
     "api_responses": {},
-    "execution_times": {}
+    "execution_times": {},
+    "logged_in": False,
 }
 for k, v in default_state.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
 def env(name: str) -> Optional[str]:
+    # Prioriza st.secrets, luego .env / env vars
     try:
-        return st.secrets.get(name) or os.getenv(name)
+        return (st.secrets.get(name) if hasattr(st, "secrets") else None) or os.getenv(name)
     except Exception:
         return os.getenv(name)
 
@@ -140,7 +142,7 @@ def render_debug_panel():
 
         if st.session_state.get("debug_logs"):
             log_df = pd.DataFrame(st.session_state["debug_logs"])
-            st.dataframe(log_df.tail(20), use_container_width=True, height=200)
+            st.dataframe(log_df.tail(50), use_container_width=True, height=240)
             log_json = json.dumps(st.session_state["debug_logs"], indent=2, default=str)
             st.download_button(
                 "💾 Exportar Logs JSON",
@@ -156,9 +158,9 @@ def render_debug_panel():
             times_df = pd.DataFrame(
                 [{"Función": k, "Tiempo (s)": f"{v:.3f}"} for k, v in sorted(times.items(), key=lambda x: x[1], reverse=True)]
             )
-            st.dataframe(times_df, use_container_width=True, height=200)
+            st.dataframe(times_df, use_container_width=True, height=240)
             total_time = sum(times.values())
-            st.metric("Tiempo Total", f"{total_time:.2f}s")
+            st.metric("Tiempo Total (instrumentado)", f"{total_time:.2f}s")
         else:
             st.info("No hay tiempos registrados")
 
@@ -170,7 +172,7 @@ def render_debug_panel():
             st.write(f"**Memoria:** {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
 
             if st.checkbox("Ver primeras filas", key="show_head"):
-                st.dataframe(df.head(10))
+                st.dataframe(df.head(20), use_container_width=True)
 
             if st.checkbox("Ver info de columnas", key="show_info"):
                 buffer = io.StringIO()
@@ -191,48 +193,35 @@ def render_debug_panel():
 # ============================================================================
 # LOGIN SEGURO (CORREGIDO)
 # ============================================================================
-from dotenv import load_dotenv
-
-# 1. Forzar recarga del .env para asegurar que lea cambios recientes
-load_dotenv(override=True)
 
 def login():
     st.title("🔐 Acceso Seguro")
-    
-    # 2. Leer variables DENTRO de la función para garantizar que están frescas
-    # .strip() evita errores si dejaste un espacio al final en el .env
-    env_user = (os.getenv("ADMIN_USER") or "admin").strip()
-    env_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
+
+    env_user = (env("ADMIN_USER") or "admin").strip()
+    env_pass = (env("ADMIN_PASS") or "admin123").strip()
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # 3. Usar st.form evita recargas extrañas al escribir
         with st.form("login_form"):
             user = st.text_input("Usuario")
             pwd = st.text_input("Contraseña", type="password")
             submit = st.form_submit_button("Iniciar Sesión", use_container_width=True)
 
             if submit:
-                # Validación directa
                 if user.strip() == env_user and pwd.strip() == env_pass:
-                    st.session_state['logged_in'] = True
+                    st.session_state["logged_in"] = True
                     st.rerun()
                 else:
                     st.error("Credenciales incorrectas.")
-                    # Debug (opcional, borra esto en producción):
                     if st.session_state.get("debug_mode"):
                         st.warning(f"Esperaba: User='{env_user}' / Pass='{env_pass[:3]}***'")
 
-# Inicialización del estado
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
-
-if not st.session_state['logged_in']:
+if not st.session_state.get("logged_in", False):
     login()
     st.stop()
 
 # ============================================================================
-# EXPORTS + EMAIL HELPERS (VERSIÓN FINAL RENOMBRADA)
+# EXPORTS + EMAIL HELPERS (UNIFICADO Y SIN DUPLICADOS)
 # ============================================================================
 
 def fig_to_bytes(fig) -> bytes:
@@ -241,17 +230,14 @@ def fig_to_bytes(fig) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# Constraints y Regex
 _EXCEL_MAX_CELL_CHARS = 32767
 _CTRL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-# --- FUNCIÓN RENOMBRADA PARA EVITAR EL NAME ERROR ---
 def limpiar_celda_excel(x: Any) -> str:
     """Limpia un valor individual para que Excel no falle."""
     if x is None:
         return ""
- 
-    # pd.isna puede devolver arrays en valores no escalares; evaluamos de forma segura.
+
     try:
         na_flag = pd.isna(x)
     except Exception:
@@ -260,30 +246,27 @@ def limpiar_celda_excel(x: Any) -> str:
     if isinstance(na_flag, bool):
         if na_flag:
             return ""
-    elif hasattr(na_flag, "all"):
+    else:
         try:
-            if na_flag.all():
+            if hasattr(na_flag, "all") and na_flag.all():
                 return ""
         except Exception:
             pass
-   
-    # Si es diccionario o lista, a JSON string
+
     if isinstance(x, (dict, list, tuple, set)):
         try:
             return json.dumps(x, ensure_ascii=False, default=str)
         except Exception:
             return str(x)
-            
-    # Si es fecha, quitar zona horaria
-    if isinstance(x, (datetime, pd.Timestamp)):
+
+    if isinstance(x, (datetime, pd.Timestamp, date)):
         try:
             ts = pd.to_datetime(x, utc=True, errors="coerce")
             if pd.notna(ts):
                 return ts.tz_localize(None).isoformat(sep=" ")
         except Exception:
             return str(x)
-            
-    # Limpieza de caracteres prohibidos en texto
+
     s = str(x)
     s = _CTRL_CHARS_RE.sub(" ", s)
     if len(s) > _EXCEL_MAX_CELL_CHARS:
@@ -291,13 +274,15 @@ def limpiar_celda_excel(x: Any) -> str:
     return s
 
 def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
-    '''Prepara todo el DataFrame usando la nueva función de limpieza.'''
-    if df is None or df.empty:
-        return pd.DataFrame() if df is None else df.copy()
-    
+    """Prepara el DataFrame para exportación segura a Excel."""
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+
     out = df.copy()
-    
-    # 1. Intentar convertir fechas primero
+
+    # 1) Normalizar fechas (quita tz)
     for col in out.columns:
         try:
             if is_datetime64tz_dtype(out[col]):
@@ -305,147 +290,73 @@ def sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
             elif is_datetime64_any_dtype(out[col]):
                 out[col] = pd.to_datetime(out[col], errors='coerce')
         except Exception:
-            # Si falla, convertir a texto limpio
             out[col] = out[col].apply(limpiar_celda_excel)
-    
-    # 2. Aplicar limpieza a todas las columnas de texto (Object)
-    # AQUI OCURRÍA EL ERROR ANTES. AHORA USA EL NOMBRE NUEVO.
+
+    # 2) Limpiar objetos (incluye dict/list)
     for col in out.columns:
-        if out[col].dtype == 'object':
+        if out[col].dtype == "object":
             out[col] = out[col].apply(limpiar_celda_excel)
-    
-    # 3. Nombres de columnas seguros
+
+    # 3) Nombres de columnas seguros
     out.columns = [str(c)[:255] for c in out.columns]
-    
     return out
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Genera el Excel en memoria."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
-    
-    # Paso 1: Sanitización normal
-    safe_df = sanitize_df_for_excel(df)
-    
+    """Convierte DataFrame a bytes Excel (robusto, sin duplicados, sin NameError)."""
     output = io.BytesIO()
     try:
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    except Exception as e:
-        log_message(f"⚠️ Falló Excel estándar: {e}. Usando modo texto plano.", "warning")
-        
-        # Paso 2: Fallback de emergencia (todo a string usando la función nueva)
-        try:
-            output = io.BytesIO()
-            fallback_df = safe_df.astype(str)
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(limpiar_celda_excel)
+        if df is None or df.empty:
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                pd.DataFrame().to_excel(writer, index=False, sheet_name="Datos")
+            output.seek(0)
+            return output.getvalue()
 
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        except Exception as e2:
-             log_message(f"❌ Error fatal en Excel: {e2}", "error")
-             return b""
+        safe_df = sanitize_df_for_excel(df)
 
-    output.seek(0)
-    return output.getvalue()
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
-        output.seek(0)
-        return output.getvalue()
-    
-    # 1. Intentar sanitización estándar
-    safe_df = sanitize_df_for_excel(df)
-    
-    output = io.BytesIO()
-    try:
         # Intento normal
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
-    except Exception as e:
-        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback.", "warning")
-        
-        # 2. MODO FALLBACK: Convertir TODO a String si falla el anterior
-        try:
-            output = io.BytesIO()
-            fallback_df = safe_df.astype(str) # Forzar todo a texto
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(_safe_excel_str)
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            safe_df.to_excel(writer, index=False, sheet_name="Datos")
 
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
-        except Exception as e2:
-             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
-             return b""
-
-    output.seek(0)
-    return output.getvalue()
-
-
-def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
-    """Convierte DataFrame a bytes de Excel (Ultra-robusto)."""
-    if df is None or df.empty:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            pd.DataFrame().to_excel(writer, index=False, sheet_name='Datos')
         output.seek(0)
         return output.getvalue()
-    
-    # 1. Intentar sanitización estándar
-    safe_df = sanitize_df_for_excel(df)
-    
-    output = io.BytesIO()
-    try:
-        # Intento normal
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            safe_df.to_excel(writer, index=False, sheet_name='Datos')
+
     except Exception as e:
-        log_message(f"⚠️ Falló exportación estándar Excel: {e}. Usando modo fallback (texto plano).", "warning")
-        
-        # 2. MODO FALLBACK: Convertir TODO a String
-        # Esto soluciona el ValueError de fechas con zona horaria o tipos mixtos
+        log_message(f"⚠️ Falló exportación Excel estándar: {e}. Usando fallback texto.", "warning")
         try:
             output = io.BytesIO()
-            fallback_df = safe_df.astype(str) # Forzar todo a texto
-            
-            # Limpiar caracteres ilegales para Excel
-            for col in fallback_df.columns:
-                fallback_df[col] = fallback_df[col].apply(lambda x: _safe_excel_str(x))
+            fallback_df = df.copy()
+            for c in fallback_df.columns:
+                fallback_df[c] = fallback_df[c].apply(limpiar_celda_excel)
+            fallback_df = fallback_df.astype(str)
 
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                fallback_df.to_excel(writer, index=False, sheet_name='Datos')
+            with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                fallback_df.to_excel(writer, index=False, sheet_name="Datos")
+
+            output.seek(0)
+            return output.getvalue()
         except Exception as e2:
-             log_message(f"❌ Error crítico en Excel fallback: {e2}", "error")
-             return b"" # Retornar vacío si todo falla
-
-    output.seek(0)
-    return output.getvalue()
+            log_message(f"❌ Error crítico Excel fallback: {e2}", "error", {"traceback": traceback.format_exc()})
+            return b""
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """Convierte DataFrame a bytes CSV (robusto)."""
     if df is None:
         return b""
     safe_df = df.copy()
-    # Avoid tz-aware in csv too
+
     for col in safe_df.columns:
         try:
             if is_datetime64tz_dtype(safe_df[col]):
                 safe_df[col] = pd.to_datetime(safe_df[col], utc=True, errors="coerce").dt.tz_localize(None)
         except Exception:
             pass
-    # Convert dict/list in object cols to json strings
+
     for col in safe_df.columns:
         if safe_df[col].dtype == "object":
-            safe_df[col] = safe_df[col].apply(lambda x: json.dumps(x, ensure_ascii=False, default=str) if isinstance(x, (dict, list, tuple, set)) else x)
+            safe_df[col] = safe_df[col].apply(
+                lambda x: json.dumps(x, ensure_ascii=False, default=str) if isinstance(x, (dict, list, tuple, set)) else x
+            )
+
     return safe_df.to_csv(index=False).encode("utf-8")
 
 @measure_time("send_email_report")
@@ -460,29 +371,29 @@ def send_email_report(to_email, subject, body, df_xlsx, df_csv, figures_dict):
         return False, "Faltan credenciales SMTP en .env"
 
     msg = MIMEMultipart()
-    msg['From'] = smtp_user
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+    msg["From"] = smtp_user
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
 
     if df_xlsx:
-        part = MIMEBase('application', "octet-stream")
+        part = MIMEBase("application", "octet-stream")
         part.set_payload(df_xlsx)
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment; filename="reporte_data.xlsx"')
+        part.add_header("Content-Disposition", 'attachment; filename="reporte_data.xlsx"')
         msg.attach(part)
 
     if df_csv:
-        part = MIMEBase('application', "octet-stream")
+        part = MIMEBase("application", "octet-stream")
         part.set_payload(df_csv)
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment; filename="reporte_data.csv"')
+        part.add_header("Content-Disposition", 'attachment; filename="reporte_data.csv"')
         msg.attach(part)
 
     for name, fig_bytes in (figures_dict or {}).items():
         try:
             image = MIMEImage(fig_bytes, name=f"{name}.png")
-            image.add_header('Content-Disposition', f'attachment; filename="{name}.png"')
+            image.add_header("Content-Disposition", f'attachment; filename="{name}.png"')
             msg.attach(image)
         except Exception as e:
             log_message(f"No se pudo adjuntar imagen {name}: {e}", "warning")
@@ -510,8 +421,7 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
     if not key:
         log_message("Falta DEEPSEEK_API_KEY", "warning")
         return "Resumen no disponible (Falta API Key)."
-
-    if df.empty:
+    if df is None or df.empty:
         return "Resumen no disponible (Sin datos)."
 
     total = len(df)
@@ -522,9 +432,10 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
         top_texts_list = []
         for _, row in top_posts.iterrows():
             user = row.get("username", "Anon")
-            txt = str(row.get("text", ""))[:100].replace("\n", " ")
+            txt = str(row.get("text", ""))[:120].replace("\n", " ")
             likes = int(row.get("likes", 0) or 0)
-            top_texts_list.append(f"- Usuario @{user}: '{txt}...' ({likes} likes)")
+            url = row.get("url", "")
+            top_texts_list.append(f"- @{user}: '{txt}...' ({likes} likes) {url}".strip())
         top_posts_str = "\n".join(top_texts_list)
     else:
         top_posts_str = "No hay datos de likes disponibles."
@@ -537,14 +448,14 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
     )
 
     prompt = (
-        f"Actúa como un analista de inteligencia digital. "
-        f"Escribe un 'Resumen Ejecutivo' breve (máx 500 palabras) en español basado en los datos proporcionados.\n\n"
+        "Actúa como un analista de inteligencia digital. "
+        "Escribe un 'Resumen Ejecutivo' breve (máx 500 palabras) en español basado en los datos proporcionados.\n\n"
         f"DATOS:\n{context}\n\n"
-        f"INSTRUCCIONES CLAVE:\n"
-        f"1. Resume la tendencia general de sentimiento y emociones.\n"
-        f"2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados.\n"
-        f"3. Entrega un resumen de métricas: posteos, interacciones y visualizaciones si están.\n"
-        f"4. Tono profesional."
+        "INSTRUCCIONES CLAVE:\n"
+        "1. Resume la tendencia general de sentimiento y emociones.\n"
+        "2. IMPORTANTE: Debes citar explícitamente al menos uno de los 'TOP POSTS VIRALES' mencionados.\n"
+        "3. Entrega un resumen de métricas: posteos, interacciones y visualizaciones si están.\n"
+        "4. Tono profesional."
     )
 
     try:
@@ -568,12 +479,13 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
             }
 
         if r.status_code == 200:
-            summary = r.json()['choices'][0]['message']['content'].strip()
+            summary = r.json()["choices"][0]["message"]["content"].strip()
             log_message("Resumen generado exitosamente", "info")
             return summary
-        else:
-            log_message(f"Error API DeepSeek: {r.status_code}", "error", {"response": r.text})
-            return f"Error API DeepSeek: {r.status_code}"
+
+        log_message(f"Error API DeepSeek: {r.status_code}", "error", {"response": r.text})
+        return f"Error API DeepSeek: {r.status_code}"
+
     except Exception as e:
         log_message(f"Error generando resumen: {e}", "error", {"exception": str(e)})
         return f"Error generando resumen: {e}"
@@ -596,8 +508,8 @@ async def async_fetch_deepseek(client: httpx.AsyncClient, prompt: str, sem: asyn
                 timeout=45.0
             )
             if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip().upper()
-                return re.sub(r'[^\w]', '', content)
+                content = response.json()["choices"][0]["message"]["content"].strip().upper()
+                return re.sub(r"[^\w]", "", content)
             return "NEU"
         except Exception as e:
             if st.session_state.get("debug_mode"):
@@ -708,7 +620,7 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
             r = requests.post(url_run, params={"token": token}, json=payload, timeout=30)
 
             if r.status_code not in [200, 201]:
-                log_message(f"Error iniciando actor: {r.status_code}", "warning")
+                log_message(f"Error iniciando actor: {r.status_code} - {r.text[:200]}", "warning")
                 continue
 
             run_data = r.json()["data"]
@@ -719,13 +631,17 @@ def run_apify_actor(actor_id: str, tokens: List[str], payload: Dict) -> List[Dic
             while time.time() - start_time < 300:
                 time.sleep(ASYNC_POLL_INTERVAL)
                 try:
-                    r_poll = requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}", params={"token": token}, timeout=10)
+                    r_poll = requests.get(
+                        f"https://api.apify.com/v2/actor-runs/{run_id}",
+                        params={"token": token},
+                        timeout=10
+                    )
                     if r_poll.status_code == 200:
                         status = r_poll.json()["data"]["status"]
                         log_message(f"Estado actor: {status}", "debug")
                         if status == "SUCCEEDED":
                             return get_apify_items_sync(dataset_id, token)
-                        elif status in ["FAILED", "ABORTED", "TIMED-OUT"]:
+                        if status in ["FAILED", "ABORTED", "TIMED-OUT"]:
                             log_message(f"Actor falló con estado: {status}", "error")
                             break
                 except Exception as e:
@@ -781,8 +697,10 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
     if "username" not in df.columns:
         for c in ["ownerUsername", "authorUsername", "username", "author", "pageName"]:
             if c in df.columns:
-                df["username"] = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
+                df["username"] = df[c].apply(lambda x: x.get("name") if isinstance(x, dict) else x)
                 break
+        if "username" not in df.columns:
+            df["username"] = ""
 
     if "text" in df.columns:
         df["text"] = df["text"].fillna("").astype(str)
@@ -802,6 +720,7 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
     all_rows = []
     cursor = None
     max_loops = (limit // 20) + 5
+
     for loop_num in range(max_loops):
         params = {"query": query, "queryType": "Latest"}
         if cursor:
@@ -817,12 +736,14 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
                 }
 
             if r.status_code != 200:
-                log_message(f"Error API X: {r.status_code}", "warning")
+                log_message(f"Error API X: {r.status_code} - {r.text[:200]}", "warning")
                 break
+
             data = r.json()
             tweets = data.get("tweets", [])
             if not tweets:
                 break
+
             for t in tweets:
                 u = t.get("author", {}) or {}
                 all_rows.append({
@@ -837,11 +758,14 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
                     "followers": u.get("followers") or u.get("followersCount") or 0,
                     "url": t.get("url"),
                 })
+
             if len(all_rows) >= limit:
                 break
+
             cursor = data.get("next_cursor") if data.get("has_next_page") else None
             if not cursor:
                 break
+
         except Exception as e:
             log_message(f"Excepción en fetch_x: {e}", "error")
             break
@@ -854,10 +778,13 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str) 
     log_message(f"Fetching Facebook ({mode}): {query}", "info")
     payload = {"resultsLimit": limit, "maxPosts": limit}
     actor = "apify/facebook-posts-scraper"
+
     if mode == "user":
         urls = []
         for u in query.split(","):
             u = u.strip()
+            if not u:
+                continue
             if "facebook.com" in u:
                 urls.append({"url": u})
             else:
@@ -866,6 +793,7 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str) 
     else:
         recent_filter = "eyJzb3J0X2tleSI6InRECENT_POSTS_V2In0%3D"
         payload["startUrls"] = [{"url": f"https://www.facebook.com/search/posts?q={query}&filters={recent_filter}"}]
+
     try:
         items = run_apify_actor(actor, tokens, payload)
         normalized = []
@@ -887,18 +815,34 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str) 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
+    """
+    ✅ FIX REAL: "Por temática (búsqueda IG)" ahora hace keyword discovery de hashtags y extrae POSTS (captions).
+    - mode == "hashtag": usa apidojo/instagram-hashtag-scraper con keyword/hashtags
+    - mode == "keyword": usa apidojo/instagram-hashtag-scraper con keyword (lo más cercano a temática real)
+    - mode == "user": usa apify/instagram-post-scraper (posts de cuentas)
+    """
     log_message(f"Fetching Instagram ({mode}): {query}", "info")
-    payload = {"resultsLimit": limit, "resultsType": "posts"}
-    if mode == "hashtag":
-        actor = "apify/instagram-hashtag-scraper"
-        payload["hashtags"] = [h.strip().replace("#", "") for h in query.split(",")]
-    elif mode == "keyword":
-        actor = "apify/instagram-scraper"
-        payload["search"] = query
-        payload["searchType"] = "hashtag"
+
+    if mode in ["hashtag", "keyword"]:
+        actor = "apidojo/instagram-hashtag-scraper"
+        payload = {
+            "maxItems": limit,
+            "getPosts": True,
+            "getReels": True,
+        }
+
+        # Si es hashtag explícito: usa keyword = hashtag (sin #) o lo que escriba el usuario.
+        # Si el usuario mete "salud,finanzas": el actor lo trata como keyword y descubre hashtags relacionados.
+        payload["keyword"] = (query or "").strip().replace("#", "")
+
     else:
+        # user
         actor = "apify/instagram-post-scraper"
-        payload["usernames"] = [u.strip() for u in query.split(",")]
+        payload = {
+            "usernames": [u.strip().lstrip("@") for u in (query or "").split(",") if u.strip()],
+            "resultsLimit": limit
+        }
+
     items = run_apify_actor(actor, tokens, payload)
     return normalize_common_optimized(items, "instagram")
 
@@ -907,9 +851,9 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
     log_message(f"Fetching TikTok ({mode}): {query}", "info")
     payload = {"resultsPerPage": 100, "shouldDownloadVideos": False, "limit": limit}
     if mode == "user":
-        payload["usernames"] = [u.strip() for u in query.split(",")]
+        payload["usernames"] = [u.strip() for u in (query or "").split(",") if u.strip()]
     else:
-        payload["hashtags"] = [h.strip().replace("#", "") for h in query.split(",")]
+        payload["hashtags"] = [h.strip().replace("#", "") for h in (query or "").split(",") if h.strip()]
     items = run_apify_actor("clockworks/tiktok-scraper", tokens, payload)
     return normalize_common_optimized(items, "tiktok")
 
@@ -940,14 +884,13 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
             try:
                 if isinstance(x, str):
                     return x[:10]
-                elif isinstance(x, date):
+                if isinstance(x, date):
                     return x.isoformat()
-                elif isinstance(x, pd.Timestamp):
+                if isinstance(x, pd.Timestamp):
                     return x.date().isoformat()
-                elif hasattr(x, 'strftime'):
+                if hasattr(x, "strftime"):
                     return pd.to_datetime(x).date().isoformat()
-                else:
-                    return str(x)[:10]
+                return str(x)[:10]
             except Exception:
                 return None
 
@@ -964,7 +907,6 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
             mask &= ((df_work["_fecha_str"] <= d2_str) | (df_work["_fecha_str"].isna()))
 
         filtered = df.loc[mask].copy()
-
         removed = len(df) - len(filtered)
         log_message(f"Filtrado: {len(df)} → {len(filtered)} ({removed} removidos)", "info")
 
@@ -978,7 +920,7 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
                     "removed": removed,
                     "d1": d1_str,
                     "d2": d2_str,
-                    "null_dates": df_work["_fecha_str"].isna().sum(),
+                    "null_dates": int(df_work["_fecha_str"].isna().sum()),
                     "fecha_cl_dtype": str(df["fecha_cl"].dtype),
                     "sample_dates": df_work["_fecha_str"].dropna().head(3).tolist()
                 }
@@ -1000,9 +942,9 @@ def plot_pie_chart(series, title):
         return None
     counts = series.value_counts()
     fig, ax = plt.subplots(figsize=(6, 6))
-    fig.patch.set_facecolor('white')
-    ax.pie(counts, labels=counts.index, autopct='%1.1f%%', startangle=90)
-    ax.set_title(title, fontsize=12, fontweight='bold')
+    fig.patch.set_facecolor("white")
+    ax.pie(counts, labels=counts.index, autopct="%1.1f%%", startangle=90)
+    ax.set_title(title, fontsize=12, fontweight="bold")
     return fig
 
 def plot_bar_chart(series, title, color_hex="#3498db"):
@@ -1010,16 +952,20 @@ def plot_bar_chart(series, title, color_hex="#3498db"):
         return None
     counts = series.value_counts()
     fig, ax = plt.subplots(figsize=(6, 5))
-    fig.patch.set_facecolor('white')
+    fig.patch.set_facecolor("white")
     ax.bar(counts.index, counts.values, color=color_hex)
-    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.set_title(title, fontsize=12, fontweight="bold")
     ax.set_ylabel("Cantidad")
     plt.tight_layout()
     return fig
 
 def clean_texts(texts: pd.Series) -> str:
     blob = []
-    EXTRA_STOP = {"rt","https","http","t","co","amp","si","no","de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le","ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"}
+    EXTRA_STOP = {
+        "rt","https","http","t","co","amp","si","no","de","la","que","el","en","y","a","los","del",
+        "se","las","por","un","para","con","una","su","al","lo","como","mas","pero","sus","le",
+        "ya","o","fue","ha","porque","cuando","muy","sin","sobre","tambien","me"
+    }
     STOP = STOPWORDS.union(EXTRA_STOP)
     for s in texts.fillna("").astype(str):
         s = re.sub(r"http\S+|www\.\S+|@\w+|#", " ", s.lower())
@@ -1034,7 +980,7 @@ def wordcloud_from_blob(blob: str, max_words: int = 200):
         return None
     wc = WordCloud(width=1200, height=500, background_color="white", max_words=max_words, colormap="viridis").generate(blob)
     fig, ax = plt.subplots(figsize=(12, 5))
-    ax.imshow(wc, interpolation='bilinear')
+    ax.imshow(wc, interpolation="bilinear")
     ax.axis("off")
     return fig
 
@@ -1044,12 +990,13 @@ def extract_topics(texts: List[str], top_n: int = 10) -> Dict[str, int]:
 
 @measure_time("detect_crisis_signals")
 def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
-    if df.empty:
+    if df is None or df.empty:
         return {"score": 0, "severity": "none", "signals": [], "crisis_posts": pd.DataFrame()}
 
     signals = []
     crisis_score = 0
-    keywords = ["crisis", "emergencia", "caída", "fallo", "problema", "error", "incidente", "demanda", "denuncia", "escándalo", "fraude", "robo", "ataque"]
+    keywords = ["crisis", "emergencia", "caída", "fallo", "problema", "error", "incidente",
+                "demanda", "denuncia", "escándalo", "fraude", "robo", "ataque"]
 
     if "sentiment" in df.columns:
         neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
@@ -1076,7 +1023,8 @@ def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
     log_message(f"Detección de crisis: score={crisis_score}, severity={severity}", "info", {"signals": signals})
     return {"score": crisis_score, "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
-def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
+def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
+                    d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
     q = (topic or "").strip()
     if not q.startswith("("):
         q = f"({q})"
@@ -1095,7 +1043,8 @@ def compose_query_x(topic: str, lang: str, exclude_rt: bool, exclude_repl: bool,
     log_message(f"Query X generado: {q}", "debug")
     return q
 
-def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool, d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
+def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_repl: bool,
+                         d1: Optional[date], d2: Optional[date], filter_chile: bool) -> str:
     u = (username or "").strip().lstrip("@")
     q = f"from:{u}"
     if lang:
@@ -1178,7 +1127,6 @@ sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
 
 st.sidebar.divider()
-
 st.sidebar.subheader("🔑 Credenciales API")
 
 env_x = env("TWITTERAPI_IO_KEY")
@@ -1186,7 +1134,8 @@ if env_x:
     api_x = env_x
     st.sidebar.success("✅ X API cargada desde .env")
 else:
-    api_x = st.sidebar.text_input("API Key twitterapi.io", type="password", key="manual_api_x", help="Ingresa tu API Key de twitterapi.io")
+    api_x = st.sidebar.text_input("API Key twitterapi.io", type="password", key="manual_api_x",
+                                 help="Ingresa tu API Key de twitterapi.io")
     if api_x:
         st.sidebar.success("✅ X API ingresada")
     else:
@@ -1197,14 +1146,14 @@ if env_apify:
     api_apify = env_apify
     st.sidebar.success("✅ Apify Token cargado desde .env")
 else:
-    api_apify = st.sidebar.text_input("Token Apify", type="password", key="manual_api_apify", help="Ingresa tu token de Apify")
+    api_apify = st.sidebar.text_input("Token Apify", type="password", key="manual_api_apify",
+                                     help="Ingresa tu token de Apify")
     if api_apify:
         st.sidebar.success("✅ Apify Token ingresado")
     else:
         st.sidebar.warning("⚠️ Apify Token no configurado")
 
 st.sidebar.divider()
-
 run_btn = st.sidebar.button("🔍 Buscar", type="primary", use_container_width=True)
 
 if debug_mode:
@@ -1235,17 +1184,20 @@ if run_btn:
                 st.error("❌ Falta API Key X. Ingresa las credenciales en el sidebar.")
                 log_message("API Key X no configurada", "error")
                 st.stop()
+
             if "usuario" in search_mode:
                 q = compose_query_x_user(username_input, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
             else:
                 q = compose_query_x(topic, lang, exclude_rt, exclude_repl, d1, d2, filter_chile)
+
             df = fetch_x_cached(api_x, q, limit)
 
         elif platform == "Facebook":
             if not tokens:
                 st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
+                log_message("Token Apify no configurado", "error")
                 st.stop()
+
             mode = "user" if "usuario" in search_mode else "search"
             q = username_input if mode == "user" else topic
             df = fetch_facebook_cached(tokens, q, limit, mode)
@@ -1253,8 +1205,10 @@ if run_btn:
         elif platform == "Instagram":
             if not tokens:
                 st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
+                log_message("Token Apify no configurado", "error")
                 st.stop()
+
+            # ✅ FIX: modos correctos
             mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
             q = hashtags_str if mode == "hashtag" else (username_input if mode == "user" else topic)
             df = fetch_instagram_cached(tokens, q, limit, mode)
@@ -1262,8 +1216,9 @@ if run_btn:
         elif platform == "TikTok":
             if not tokens:
                 st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
-                log_message("Token Apify no configurada", "error")
+                log_message("Token Apify no configurado", "error")
                 st.stop()
+
             mode = "user" if "usuario" in search_mode else "hashtag"
             q = username_input if mode == "user" else topic
             df = fetch_tiktok_cached(tokens, q, limit, mode)
@@ -1282,7 +1237,7 @@ if run_btn:
 
         prog.progress(0.4, text="Verificando datos...")
 
-        if df.empty:
+        if df is None or df.empty:
             st.warning("No se encontraron resultados.")
             log_message("Búsqueda sin resultados", "warning")
             st.stop()
@@ -1350,7 +1305,6 @@ if df is not None and not df.empty:
             cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
             st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
 
-            # ✅ FIX: Excel-safe export always
             try:
                 crisis_xlsx = df_to_excel_bytes(crisis_data["crisis_posts"])
                 st.download_button(
@@ -1382,7 +1336,7 @@ if df is not None and not df.empty:
             if not by_day.empty:
                 fig, ax = plt.subplots(figsize=(10,4))
                 dates_str = [str(d) for d in by_day.index]
-                ax.bar(dates_str, by_day.values, color="#2ca02c")
+                ax.bar(dates_str, by_day.values)
                 ax.set_title("Evolución diaria")
                 plt.xticks(rotation=45)
                 st.pyplot(fig)
@@ -1455,21 +1409,21 @@ if df is not None and not df.empty:
             else:
                 with st.spinner("Enviando..."):
                     query_val = topic or username_input or hashtags_str
-                    fecha_reporte = datetime.now(SCL_TZ).strftime('%d/%m/%Y %H:%M')
+                    fecha_reporte = datetime.now(SCL_TZ).strftime("%d/%m/%Y %H:%M")
 
                     email_body = (
-                        f"REPORTE SOCIAL LISTENING PRO\n"
-                        f"============================\n"
+                        "REPORTE SOCIAL LISTENING PRO\n"
+                        "============================\n"
                         f"Fecha de generación: {fecha_reporte}\n"
                         f"Plataforma: {platform}\n"
                         f"Búsqueda: {query_val}\n\n"
-                        f"RESUMEN EJECUTIVO (IA):\n"
+                        "RESUMEN EJECUTIVO (IA):\n"
                         f"{ai_summary if ai_summary else 'No disponible.'}\n\n"
-                        f"METRICAS GENERALES:\n"
+                        "METRICAS GENERALES:\n"
                         f"- Total Posts: {len(df)}\n"
                         f"- Interacciones Totales: {int(df.get('likes',0).sum() + df.get('comments',0).sum())}\n"
                         f"- Visualizaciones: {int(df.get('views',0).sum())}\n\n"
-                        f"Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
+                        "Se adjuntan los datos detallados (Excel/CSV) y los gráficos del dashboard.\n"
                     )
 
                     success, msg = send_email_report(
