@@ -78,6 +78,17 @@ def env(name: str) -> Optional[str]:
     except Exception:
         return os.getenv(name)
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = env(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
+
+REQUIRE_LOGIN = env_bool("REQUIRE_LOGIN", True)
+ENABLE_DEBUG_TOOLS = env_bool("ENABLE_DEBUG_TOOLS", False)
+AI_FAST_MODE = env_bool("AI_FAST_MODE", True)
+AI_MAX_TEXTS = int(env("AI_MAX_TEXTS") or 300)
+
 def log_message(msg: str, level: str = "info", debug_data: Optional[Dict] = None):
     timestamp = datetime.now(SCL_TZ).strftime("%H:%M:%S.%f")[:-3]
     log_entry = f"[{timestamp}] {msg}"
@@ -199,12 +210,17 @@ def render_debug_panel():
 # =============================================================================
 # LOGIN SEGURO
 # =============================================================================
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 def login():
     st.title("🔐 Acceso Seguro")
-    env_user = (os.getenv("ADMIN_USER") or "admin").strip()
-    env_pass = (os.getenv("ADMIN_PASS") or "admin123").strip()
+    env_user = (env("ADMIN_USER") or "").strip()
+    env_pass = (env("ADMIN_PASS") or "").strip()
+
+    if not env_user or not env_pass:
+        st.error("ConfiguraciÃ³n incompleta de login.")
+        st.info("Define ADMIN_USER y ADMIN_PASS en Streamlit Secrets para habilitar acceso.")
+        st.stop()
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -219,13 +235,13 @@ def login():
                     st.rerun()
                 else:
                     st.error("Credenciales incorrectas.")
-                    if st.session_state.get("debug_mode"):
-                        st.warning(f"Esperaba: User='{env_user}' / Pass='{env_pass[:3]}***'")
 
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 
-if not st.session_state['logged_in']:
+if not REQUIRE_LOGIN:
+    st.session_state["logged_in"] = True
+elif not st.session_state['logged_in']:
     login()
     st.stop()
 
@@ -1093,6 +1109,30 @@ def extract_topics(texts: List[str], top_n: int = 10) -> Dict[str, int]:
     blob = clean_texts(pd.Series(texts))
     return dict(Counter(blob.split()).most_common(top_n))
 
+@measure_time("select_ai_subset")
+def select_ai_subset(df: pd.DataFrame, max_texts: int, fast_mode: bool) -> List[Any]:
+    if df is None or df.empty:
+        return []
+    if not fast_mode or max_texts <= 0 or len(df) <= max_texts:
+        return df.index.tolist()
+
+    score_cols = [c for c in ["likes", "comments", "shares", "views"] if c in df.columns]
+    if score_cols:
+        ranked = df.copy()
+        ranked["_ai_score"] = 0
+        for col in score_cols:
+            ranked["_ai_score"] = ranked["_ai_score"] + pd.to_numeric(ranked[col], errors="coerce").fillna(0)
+        selected = ranked.sort_values("_ai_score", ascending=False).head(max_texts).index.tolist()
+    else:
+        selected = df.sample(n=max_texts, random_state=42).index.tolist()
+
+    log_message(
+        f"AI fast-mode activo: analizando muestra {len(selected)}/{len(df)} posts",
+        "info",
+        {"fast_mode": fast_mode, "max_texts": max_texts}
+    )
+    return selected
+
 @measure_time("detect_crisis_signals")
 def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
     if df.empty:
@@ -1178,11 +1218,14 @@ st.markdown("**Análisis avanzado con detección de crisis, sentimiento y report
 st.sidebar.header("⚙️ Configuración")
 
 st.sidebar.markdown("---")
-debug_mode = st.sidebar.checkbox(
-    "🐛 **Modo Debug**",
-    value=st.session_state.get("debug_mode", False),
-    key="toggle_debug_mode"
-)
+if ENABLE_DEBUG_TOOLS:
+    debug_mode = st.sidebar.checkbox(
+        "🐛 **Modo Debug**",
+        value=st.session_state.get("debug_mode", False),
+        key="toggle_debug_mode"
+    )
+else:
+    debug_mode = False
 st.session_state["debug_mode"] = debug_mode
 if debug_mode:
     st.sidebar.info("⚠️ Modo Debug activo. Ver panel abajo.")
@@ -1239,6 +1282,25 @@ max_words = st.sidebar.slider("Máx. palabras nube", 50, 500, 200)
 sentiment = st.sidebar.checkbox("🧠 Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("😊 Analizar Emociones", value=False)
 
+ai_fast_mode_runtime = AI_FAST_MODE
+ai_max_texts_runtime = AI_MAX_TEXTS
+if ENABLE_DEBUG_TOOLS and debug_mode:
+    st.sidebar.markdown("### IA (Debug/Admin)")
+    ai_fast_mode_runtime = st.sidebar.checkbox(
+        "⚡ IA modo rápido",
+        value=AI_FAST_MODE,
+        help="Si se activa, sentimiento/emociones se calculan sobre una muestra priorizada."
+    )
+    if ai_fast_mode_runtime:
+        ai_max_texts_runtime = st.sidebar.slider(
+            "IA máximo textos",
+            min_value=50,
+            max_value=2000,
+            value=max(50, min(AI_MAX_TEXTS, 2000)),
+            step=50,
+            help="Cantidad máxima de textos a enviar a IA en modo rápido."
+        )
+
 st.sidebar.divider()
 
 st.sidebar.subheader("🔑 Credenciales API")
@@ -1246,24 +1308,18 @@ st.sidebar.subheader("🔑 Credenciales API")
 env_x = env("TWITTERAPI_IO_KEY")
 if env_x:
     api_x = env_x
-    st.sidebar.success("✅ X API cargada desde .env")
+    st.sidebar.success("✅ X API cargada desde secrets/config")
 else:
-    api_x = st.sidebar.text_input("API Key twitterapi.io", type="password", key="manual_api_x", help="Ingresa tu API Key de twitterapi.io")
-    if api_x:
-        st.sidebar.success("✅ X API ingresada")
-    else:
-        st.sidebar.warning("⚠️ X API no configurada")
+    api_x = None
+    st.sidebar.error("❌ X API no configurada (define TWITTERAPI_IO_KEY en Streamlit Secrets)")
 
 env_apify = env("APIFY_TOKEN")
 if env_apify:
     api_apify = env_apify
-    st.sidebar.success("✅ Apify Token cargado desde .env")
+    st.sidebar.success("✅ Apify Token cargado desde secrets/config")
 else:
-    api_apify = st.sidebar.text_input("Token Apify", type="password", key="manual_api_apify", help="Ingresa tu token de Apify")
-    if api_apify:
-        st.sidebar.success("✅ Apify Token ingresado")
-    else:
-        st.sidebar.warning("⚠️ Apify Token no configurado")
+    api_apify = None
+    st.sidebar.error("❌ Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
 
 st.sidebar.divider()
 
@@ -1294,7 +1350,7 @@ if run_btn:
 
         if platform.startswith("X"):
             if not api_x:
-                st.error("❌ Falta API Key X. Ingresa las credenciales en el sidebar.")
+                st.error("❌ Falta API Key X. Configura TWITTERAPI_IO_KEY en Streamlit Secrets.")
                 log_message("API Key X no configurada", "error")
                 st.stop()
             if "usuario" in search_mode:
@@ -1305,7 +1361,7 @@ if run_btn:
 
         elif platform == "Facebook":
             if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                st.error("❌ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             mode = "user" if "usuario" in search_mode else "search"
@@ -1314,7 +1370,7 @@ if run_btn:
 
         elif platform == "Instagram":
             if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                st.error("❌ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             mode = "hashtag" if "hashtags" in search_mode else "keyword" if "búsqueda" in search_mode else "user"
@@ -1323,7 +1379,7 @@ if run_btn:
 
         elif platform == "TikTok":
             if not tokens:
-                st.error("❌ Falta Token Apify. Ingresa las credenciales en el sidebar.")
+                st.error("❌ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             mode = "user" if "usuario" in search_mode else "hashtag"
@@ -1354,17 +1410,31 @@ if run_btn:
         prog.progress(0.5, text="Procesando IA...")
 
         if "text" in df.columns:
-            texts = df["text"].tolist()
+            ai_idx = select_ai_subset(df, ai_max_texts_runtime, ai_fast_mode_runtime)
+            if len(ai_idx) < len(df):
+                st.info(
+                    f"Modo rapido IA activo: se analizaron {len(ai_idx)} de {len(df)} posts "
+                    f"(configurable con AI_FAST_MODE/AI_MAX_TEXTS)."
+                )
+            elif not ai_fast_mode_runtime:
+                st.info("Modo precision IA activo: se analizaron todos los posts.")
+            texts_ai = df.loc[ai_idx, "text"].tolist() if ai_idx else []
 
             if sentiment:
                 prog.progress(0.6, text="Analizando sentimiento...")
                 with st.spinner("DeepSeek Sentimiento..."):
-                    df["sentiment"] = analyze_sentiment_deepseek_optimized(texts)
+                    df["sentiment"] = "NEU"
+                    if texts_ai:
+                        sent_ai = analyze_sentiment_deepseek_optimized(texts_ai)
+                        df.loc[ai_idx, "sentiment"] = sent_ai
 
             if emotions:
                 prog.progress(0.7, text="Analizando emociones...")
                 with st.spinner("DeepSeek Emociones..."):
-                    df["emotion"] = analyze_emotions_deepseek_optimized(texts)
+                    df["emotion"] = "NEUTRAL"
+                    if texts_ai:
+                        emo_ai = analyze_emotions_deepseek_optimized(texts_ai)
+                        df.loc[ai_idx, "emotion"] = emo_ai
 
             prog.progress(0.8, text="Generando resumen ejecutivo...")
             with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
