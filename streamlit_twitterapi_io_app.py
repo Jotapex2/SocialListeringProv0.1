@@ -26,7 +26,7 @@ import traceback
 # CONFIG
 # =============================================================================
 
-st.set_page_config(page_title="SocialListening Pro", page_icon="ðŸ“¡", layout="wide")
+st.set_page_config(page_title="SocialListening Pro", page_icon="SLP", layout="wide")
 
 BUILD_TAG = "JP Release v6.8.2 - IG keyword fixed + FB search actor + Apify v2 robust runs + Excel export dedup"
 st.caption(f"Build: {BUILD_TAG}")
@@ -123,12 +123,12 @@ def measure_time(func_name: str):
                 elapsed = time.time() - start
                 if st.session_state.get("debug_mode"):
                     st.session_state["execution_times"][func_name] = elapsed
-                    log_message(f"â±ï¸ {func_name} ejecutado en {elapsed:.2f}s", "debug")
+                    log_message(f"{func_name} ejecutado en {elapsed:.2f}s", "debug")
                 return result
             except Exception as e:
                 elapsed = time.time() - start
                 log_message(
-                    f"âŒ {func_name} fallÃ³ despuÃ©s de {elapsed:.2f}s: {str(e)}",
+                    f"{func_name} fallo despues de {elapsed:.2f}s: {str(e)}",
                     "error",
                     {"exception": str(e), "traceback": traceback.format_exc()}
                 )
@@ -145,12 +145,12 @@ def render_debug_panel():
         return
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("ðŸ› Debug Tools")
+    st.sidebar.subheader("Debug Tools")
 
-    debug_tabs = st.sidebar.tabs(["ðŸ“‹ Logs", "â±ï¸ Tiempos", "ðŸ” Datos", "ðŸ“¡ APIs"])
+    debug_tabs = st.sidebar.tabs(["Logs", "Tiempos", "Datos", "APIs"])
 
     with debug_tabs[0]:
-        if st.button("ðŸ—‘ï¸ Limpiar Logs", key="clear_logs"):
+        if st.button("Limpiar Logs", key="clear_logs"):
             st.session_state["debug_logs"] = []
             st.session_state["logs"] = []
 
@@ -162,7 +162,7 @@ def render_debug_panel():
             st.dataframe(log_df.tail(20), use_container_width=True, height=200)
             log_json = json.dumps(st.session_state["debug_logs"], indent=2, default=str)
             st.download_button(
-                "ðŸ’¾ Exportar Logs JSON",
+                "Exportar Logs JSON",
                 log_json,
                 "debug_logs.json",
                 "application/json",
@@ -173,7 +173,7 @@ def render_debug_panel():
         times = st.session_state.get("execution_times", {})
         if times:
             times_df = pd.DataFrame(
-                [{"FunciÃ³n": k, "Tiempo (s)": f"{v:.3f}"} for k, v in sorted(times.items(), key=lambda x: x[1], reverse=True)]
+                [{"Funcion": k, "Tiempo (s)": f"{v:.3f}"} for k, v in sorted(times.items(), key=lambda x: x[1], reverse=True)]
             )
             st.dataframe(times_df, use_container_width=True, height=200)
             total_time = sum(times.values())
@@ -213,12 +213,12 @@ def render_debug_panel():
 load_dotenv(override=False)
 
 def login():
-    st.title("ðŸ” Acceso Seguro")
+    st.title("Acceso Seguro")
     env_user = (env("ADMIN_USER") or "").strip()
     env_pass = (env("ADMIN_PASS") or "").strip()
 
     if not env_user or not env_pass:
-        st.error("ConfiguraciÃƒÂ³n incompleta de login.")
+        st.error("Configuracion incompleta de login.")
         st.info("Define ADMIN_USER y ADMIN_PASS en Streamlit Secrets para habilitar acceso.")
         st.stop()
 
@@ -226,8 +226,8 @@ def login():
     with col2:
         with st.form("login_form"):
             user = st.text_input("Usuario")
-            pwd = st.text_input("ContraseÃ±a", type="password")
-            submit = st.form_submit_button("Iniciar SesiÃ³n", use_container_width=True)
+            pwd = st.text_input("Contrasena", type="password")
+            submit = st.form_submit_button("Iniciar sesion", use_container_width=True)
 
             if submit:
                 if user.strip() == env_user and pwd.strip() == env_pass:
@@ -340,7 +340,7 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
         return output.getvalue()
 
     except Exception as e:
-        log_message(f"âš ï¸ FallÃ³ Excel estÃ¡ndar: {e}. Intentando fallback texto plano.", "warning")
+        log_message(f"Fallo Excel estandar: {e}. Intentando fallback texto plano.", "warning")
         try:
             output = io.BytesIO()
             fallback_df = df.copy()
@@ -352,7 +352,7 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
             output.seek(0)
             return output.getvalue()
         except Exception as e2:
-            log_message(f"âŒ Error fatal en Excel fallback: {e2}", "error", {"traceback": traceback.format_exc()})
+            log_message(f"Error fatal en Excel fallback: {e2}", "error", {"traceback": traceback.format_exc()})
             return b""
 
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
@@ -454,20 +454,20 @@ def generate_executive_summary(df: pd.DataFrame, query: str) -> str:
         top_posts_str = "No hay datos de likes disponibles."
 
     context = (
-        f"AnÃ¡lisis para: '{query}'.\n"
+        f"Analisis para: '{query}'.\n"
         f"Volumen Total: {total} posts.\n"
         f"Sentimiento: {sent_counts.get('POS',0):.1%} Positivo, {sent_counts.get('NEG',0):.1%} Negativo.\n"
         f"TOP POSTS VIRALES:\n{top_posts_str}"
     )
 
     prompt = (
-        f"ActÃºa como un analista de inteligencia digital. "
-        f"Escribe un 'Resumen Ejecutivo' breve (mÃ¡x 500 palabras) en espaÃ±ol basado en los datos proporcionados.\n\n"
+        f"Actua como un analista de inteligencia digital. "
+        f"Escribe un 'Resumen Ejecutivo' breve (max 500 palabras) en espanol basado en los datos proporcionados.\n\n"
         f"DATOS:\n{context}\n\n"
         f"INSTRUCCIONES CLAVE:\n"
         f"1. Resume la tendencia general de sentimiento y emociones.\n"
-        f"2. IMPORTANTE: Debes citar explÃ­citamente al menos uno de los 'TOP POSTS VIRALES' mencionados.\n"
-        f"3. Entrega un resumen de mÃ©tricas: posteos, interacciones y visualizaciones si estÃ¡n.\n"
+        f"2. IMPORTANTE: Debes citar explicitamente al menos uno de los 'TOP POSTS VIRALES' mencionados.\n"
+        f"3. Entrega un resumen de metricas: posteos, interacciones y visualizaciones si estan.\n"
         f"4. Tono profesional."
     )
 
@@ -561,7 +561,7 @@ async def process_emotions_batch_async(texts: List[str]) -> List[str]:
         tasks = []
         for text in texts:
             safe_text = (text or "")[:300]
-            prompt = f"Detecta la emociÃ³n en: '{safe_text}'. Opciones: {', '.join(valid_emotions)}. Responde SOLO con la palabra clave."
+            prompt = f"Detecta la emocion en: '{safe_text}'. Opciones: {', '.join(valid_emotions)}. Responde SOLO con la palabra clave."
             tasks.append(async_fetch_deepseek(client, prompt, sem, 10))
         results = await asyncio.gather(*tasks)
 
@@ -658,7 +658,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
     """
     valid_tokens = [t for t in tokens if t and t.strip()]
     if not valid_tokens:
-        log_message("No hay tokens Apify vÃ¡lidos", "warning")
+        log_message("No hay tokens Apify validos", "warning")
         return []
 
     actor_path = actor_id.replace("/", "~")
@@ -703,7 +703,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
                     dataset_id = dataset_id or final_data.get("defaultDatasetId")
                     break
                 if status in ["FAILED", "ABORTED", "TIMED-OUT"]:
-                    log_message(f"Actor fallÃ³ con estado: {status}", "error", {"run": final_data})
+                    log_message(f"Actor fallo con estado: {status}", "error", {"run": final_data})
                     break
 
             if status != "SUCCEEDED":
@@ -716,7 +716,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
             return apify_dataset_items_paginated(dataset_id, token, limit_total=int(payload.get("maxItems") or payload.get("resultsLimit") or 5000))
 
         except Exception as e:
-            log_message(f"ExcepciÃ³n en run_apify_actor_v2: {e}", "error", {"traceback": traceback.format_exc()})
+            log_message(f"Excepcion en run_apify_actor_v2: {e}", "error", {"traceback": traceback.format_exc()})
             continue
 
     return []
@@ -759,9 +759,9 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
 
             failed = df["created_at_utc"].isna().sum()
             if failed > 0:
-                log_message(f"âš ï¸ {failed} fechas no convertidas", "warning")
+                log_message(f"{failed} fechas no convertidas", "warning")
         except Exception as e:
-            log_message(f"Error en conversiÃ³n de fechas: {e}", "error")
+            log_message(f"Error en conversion de fechas: {e}", "error")
             df["created_at_utc"] = pd.NaT
             df["fecha_cl"] = None
             df["created_at_display"] = pd.NaT
@@ -790,7 +790,7 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     df["platform"] = platform
-    log_message(f"NormalizaciÃ³n completa: {df.shape}", "debug")
+    log_message(f"Normalizacion completa: {df.shape}", "debug")
     return df
 
 # =============================================================================
@@ -851,7 +851,7 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
                 break
 
         except Exception as e:
-            log_message(f"ExcepciÃ³n en fetch_x: {e}", "error", {"traceback": traceback.format_exc()})
+            log_message(f"Excepcion en fetch_x: {e}", "error", {"traceback": traceback.format_exc()})
             break
 
     log_message(f"Total tweets obtenidos: {len(all_rows)}", "info")
@@ -1027,10 +1027,10 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
 
     current = datetime.now(SCL_TZ).date()
     if d1 and d1 > current:
-        log_message(f"Ajustando fecha 'desde' futura: {d1} â†’ {current}", "warning")
+        log_message(f"Ajustando fecha 'desde' futura: {d1} -> {current}", "warning")
         d1 = current
     if d2 and d2 > current:
-        log_message(f"Ajustando fecha 'hasta' futura: {d2} â†’ {current}", "warning")
+        log_message(f"Ajustando fecha 'hasta' futura: {d2} -> {current}", "warning")
         d2 = current
 
     try:
@@ -1065,7 +1065,7 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
 
         filtered = df.loc[mask].copy()
         removed = len(df) - len(filtered)
-        log_message(f"Filtrado: {len(df)} â†’ {len(filtered)} ({removed} removidos)", "info")
+        log_message(f"Filtrado: {len(df)} -> {len(filtered)} ({removed} removidos)", "info")
 
         if st.session_state.get("debug_mode"):
             log_message(
@@ -1087,7 +1087,7 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
 
     except Exception as e:
         log_message(f"Error en filtrado: {e}", "error", {"traceback": traceback.format_exc()})
-        st.warning(f"âš ï¸ Error al filtrar fechas: {e}. Mostrando todos los datos.")
+        st.warning(f"Error al filtrar fechas: {e}. Mostrando todos los datos.")
         return df
 
 # =============================================================================
@@ -1172,7 +1172,7 @@ def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
 
     signals = []
     crisis_score = 0
-    keywords = ["crisis", "emergencia", "caÃ­da", "fallo", "problema", "error", "incidente", "demanda", "denuncia", "escÃ¡ndalo", "fraude", "robo", "ataque"]
+    keywords = ["crisis", "emergencia", "caida", "fallo", "problema", "error", "incidente", "demanda", "denuncia", "escandalo", "fraude", "robo", "ataque"]
 
     if "sentiment" in df.columns:
         neg_ratio = (df["sentiment"] == "NEG").sum() / max(1, len(df))
@@ -1191,12 +1191,12 @@ def detect_crisis_signals(df: pd.DataFrame) -> Dict[str, Any]:
                 influencers = crisis_posts[crisis_posts["followers"] > 10000]
                 if not influencers.empty:
                     crisis_score += min(30, len(influencers) * 10)
-                    signals.append(f"âš ï¸ {len(influencers)} cuenta(s) influyente(s) involucrada(s)")
+                    signals.append(f"{len(influencers)} cuenta(s) influyente(s) involucrada(s)")
 
     crisis_score = min(100, crisis_score)
     severity = "critical" if crisis_score >= 80 else "high" if crisis_score >= 60 else "medium" if crisis_score >= 30 else "low"
 
-    log_message(f"DetecciÃ³n de crisis: score={crisis_score}, severity={severity}", "info", {"signals": signals})
+    log_message(f"Deteccion de crisis: score={crisis_score}, severity={severity}", "info", {"signals": signals})
     return {"score": crisis_score, "severity": severity, "signals": signals, "crisis_posts": crisis_posts}
 
 # =============================================================================
@@ -1244,15 +1244,15 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
 # UI
 # =============================================================================
 
-st.title("ðŸ“¡ Social Listening Pro â€” X + Instagram + Facebook + TikTok")
-st.markdown("**AnÃ¡lisis avanzado con detecciÃ³n de crisis, sentimiento y reporte por email**")
+st.title("Social Listening Pro - X + Instagram + Facebook + TikTok")
+st.markdown("**Analisis avanzado con deteccion de crisis, sentimiento y reporte por email**")
 
-st.sidebar.header("âš™ï¸ ConfiguraciÃ³n")
+st.sidebar.header("Configuracion")
 
 st.sidebar.markdown("---")
 if ENABLE_DEBUG_TOOLS:
     debug_mode = st.sidebar.checkbox(
-        "ðŸ› **Modo Debug**",
+        "Modo Debug",
         value=st.session_state.get("debug_mode", False),
         key="toggle_debug_mode"
     )
@@ -1260,23 +1260,23 @@ else:
     debug_mode = False
 st.session_state["debug_mode"] = debug_mode
 if debug_mode:
-    st.sidebar.info("âš ï¸ Modo Debug activo. Ver panel abajo.")
+    st.sidebar.info("Modo Debug activo. Ver panel abajo.")
 st.sidebar.markdown("---")
 
 platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
 
 if platform == "Instagram":
-    search_mode = st.sidebar.radio("Modo", ["Por temÃ¡tica (hashtags)", "Por temÃ¡tica (bÃºsqueda IG)", "Por usuario"])
+    search_mode = st.sidebar.radio("Modo", ["Por tematica (hashtags)", "Por tematica (busqueda IG)", "Por usuario"])
 elif platform == "Facebook":
-    search_mode = st.sidebar.radio("Modo", ["Por temÃ¡tica", "Por usuario"])
+    search_mode = st.sidebar.radio("Modo", ["Por tematica", "Por usuario"])
 else:
-    search_mode = st.sidebar.radio("Modo", ["Por temÃ¡tica", "Por usuario"])
+    search_mode = st.sidebar.radio("Modo", ["Por tematica", "Por usuario"])
 
 topic = ""
 username_input = ""
 hashtags_str = ""
 
-if search_mode.startswith("Por temÃ¡tica"):
+if search_mode.startswith("Por tematica"):
     if platform == "Instagram" and "hashtags" in search_mode:
         hashtags_str = st.sidebar.text_input("Hashtag(s) (sin #, separado por comas)")
     else:
@@ -1288,12 +1288,12 @@ lang = st.sidebar.selectbox("Idioma (solo X)", ["", "es", "en", "pt"], index=1)
 col1, col2 = st.sidebar.columns(2)
 exclude_rt = col1.checkbox("Excluir RTs [X]", value=True)
 exclude_repl = col2.checkbox("Excluir respuestas [X]", value=True)
-filter_chile = st.sidebar.checkbox("ðŸ‡¨ðŸ‡± Filtrar solo Chile (X)")
+filter_chile = st.sidebar.checkbox("Filtrar solo Chile (X)")
 
 # Facebook search extras
 fb_search_type = "latest"
 fb_location = None
-if platform == "Facebook" and search_mode == "Por temÃ¡tica":
+if platform == "Facebook" and search_mode == "Por tematica":
     fb_search_type = st.sidebar.selectbox("FB Search Type", ["latest", "top"], index=0)
     fb_location = st.sidebar.text_input("FB Location (opcional)", placeholder="Santiago, Chile")
 
@@ -1306,62 +1306,62 @@ d1 = st.sidebar.date_input("Desde", value=default_start, max_value=current_date_
 d2 = st.sidebar.date_input("Hasta", value=current_date_cl, max_value=current_date_cl, min_value=d1 if d1 else None, key="date_input_to")
 
 if d1 and d2 and d1 > d2:
-    st.sidebar.error("âš ï¸ Fecha 'Desde' no puede ser posterior a 'Hasta'")
+    st.sidebar.error("Fecha 'Desde' no puede ser posterior a 'Hasta'")
 
-limit = st.sidebar.slider("LÃ­mite de posts", 50, 2000, 200)
-max_words = st.sidebar.slider("MÃ¡x. palabras nube", 50, 500, 200)
+limit = st.sidebar.slider("Limite de posts", 50, 2000, 200)
+max_words = st.sidebar.slider("Max. palabras nube", 50, 500, 200)
 
-sentiment = st.sidebar.checkbox("ðŸ§  Analizar Sentimiento", value=True)
-emotions = st.sidebar.checkbox("ðŸ˜Š Analizar Emociones", value=False)
+sentiment = st.sidebar.checkbox("Analizar Sentimiento", value=True)
+emotions = st.sidebar.checkbox("Analizar Emociones", value=False)
 
 ai_fast_mode_runtime = AI_FAST_MODE
 ai_max_texts_runtime = AI_MAX_TEXTS
 if ENABLE_DEBUG_TOOLS and debug_mode:
     st.sidebar.markdown("### IA (Debug/Admin)")
     ai_fast_mode_runtime = st.sidebar.checkbox(
-        "âš¡ IA modo rÃ¡pido",
+        "IA modo rapido",
         value=AI_FAST_MODE,
         help="Si se activa, sentimiento/emociones se calculan sobre una muestra priorizada."
     )
     if ai_fast_mode_runtime:
         ai_max_texts_runtime = st.sidebar.slider(
-            "IA mÃ¡ximo textos",
+            "IA maximo textos",
             min_value=50,
             max_value=2000,
             value=max(50, min(AI_MAX_TEXTS, 2000)),
             step=50,
-            help="Cantidad mÃ¡xima de textos a enviar a IA en modo rÃ¡pido."
+            help="Cantidad maxima de textos a enviar a IA en modo rapido."
         )
 
 st.sidebar.divider()
 
-st.sidebar.subheader("ðŸ”‘ Credenciales API")
+st.sidebar.subheader("Credenciales API")
 
 env_x = env("TWITTERAPI_IO_KEY")
 if env_x:
     api_x = env_x
-    st.sidebar.success("âœ… X API cargada desde secrets/config")
+    st.sidebar.success("X API cargada desde secrets/config")
 else:
     api_x = None
-    st.sidebar.error("âŒ X API no configurada (define TWITTERAPI_IO_KEY en Streamlit Secrets)")
+    st.sidebar.error("X API no configurada (define TWITTERAPI_IO_KEY en Streamlit Secrets)")
 
 env_apify = env("APIFY_TOKEN")
 if env_apify:
     api_apify = env_apify
-    st.sidebar.success("âœ… Apify Token cargado desde secrets/config")
+    st.sidebar.success("Apify Token cargado desde secrets/config")
 else:
     api_apify = None
-    st.sidebar.error("âŒ Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
+    st.sidebar.error("Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
 
 st.sidebar.divider()
 
-run_btn = st.sidebar.button("ðŸ” Buscar", type="primary", use_container_width=True)
+run_btn = st.sidebar.button("Buscar", type="primary", use_container_width=True)
 
 if debug_mode:
     render_debug_panel()
 
 # =============================================================================
-# EJECUCIÃ“N
+# EJECUCION
 # =============================================================================
 
 if run_btn:
@@ -1372,7 +1372,7 @@ if run_btn:
     st.session_state["report_figures"] = {}
     st.session_state["ai_summary"] = None
 
-    log_message("ðŸš€ Iniciando bÃºsqueda", "info")
+    log_message("Iniciando busqueda", "info")
     prog = st.progress(0.0, text="Iniciando...")
     df = pd.DataFrame()
     tokens = [t for t in [api_apify] if t]
@@ -1382,7 +1382,7 @@ if run_btn:
 
         if platform.startswith("X"):
             if not api_x:
-                st.error("âŒ Falta API Key X. Configura TWITTERAPI_IO_KEY en Streamlit Secrets.")
+                st.error("Falta API Key X. Configura TWITTERAPI_IO_KEY en Streamlit Secrets.")
                 log_message("API Key X no configurada", "error")
                 st.stop()
             if "usuario" in search_mode:
@@ -1393,7 +1393,7 @@ if run_btn:
 
         elif platform == "Facebook":
             if not tokens:
-                st.error("âŒ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
+                st.error("Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             mode = "user" if "usuario" in search_mode else "search"
@@ -1402,7 +1402,7 @@ if run_btn:
 
         elif platform == "Instagram":
             if not tokens:
-                st.error("âŒ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
+                st.error("Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             search_mode_norm = unidecode((search_mode or "").lower())
@@ -1412,7 +1412,7 @@ if run_btn:
 
         elif platform == "TikTok":
             if not tokens:
-                st.error("âŒ Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
+                st.error("Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
             mode = "user" if "usuario" in search_mode else "hashtag"
@@ -1429,16 +1429,16 @@ if run_btn:
                 "error",
                 {"d1": str(d1), "d2": str(d2), "traceback": traceback.format_exc()}
             )
-            st.warning("âš ï¸ No se pudo aplicar el filtro de fechas. Mostrando todos los resultados.")
+            st.warning("No se pudo aplicar el filtro de fechas. Mostrando todos los resultados.")
 
         prog.progress(0.4, text="Verificando datos...")
 
         if df.empty:
             st.warning("No se encontraron resultados.")
-            log_message("BÃºsqueda sin resultados", "warning")
+            log_message("Busqueda sin resultados", "warning")
             st.stop()
 
-        log_message(f"âœ… Obtenidos {len(df)} posts", "info")
+        log_message(f"Obtenidos {len(df)} posts", "info")
 
         prog.progress(0.5, text="Procesando IA...")
 
@@ -1475,12 +1475,12 @@ if run_btn:
                 summary = generate_executive_summary(df, query_context)
                 st.session_state["ai_summary"] = summary
 
-        prog.progress(1.0, text="âœ… Listo")
+        prog.progress(1.0, text="Listo")
         st.session_state["df"] = df
-        log_message("âœ… Proceso completado exitosamente", "info")
+        log_message("Proceso completado exitosamente", "info")
 
     except Exception as e:
-        st.error(f"Error crÃ­tico: {e}")
+        st.error(f"Error critico: {e}")
         log_message(str(e), "error", {"traceback": traceback.format_exc()})
         if st.session_state.get("debug_mode"):
             st.exception(e)
@@ -1488,7 +1488,7 @@ if run_btn:
         prog.empty()
 
 # =============================================================================
-# VISUALIZACIÃ“N & REPORTE
+# VISUALIZACION & REPORTE
 # =============================================================================
 
 df = st.session_state.get("df")
@@ -1497,20 +1497,20 @@ ai_summary = st.session_state.get("ai_summary")
 if df is not None and not df.empty:
 
     if ai_summary:
-        st.info(f"ðŸ¤– **Resumen Ejecutivo (IA):**\n\n{ai_summary}")
+        st.info(f"**Resumen Ejecutivo (IA):**\n\n{ai_summary}")
 
     crisis_data = detect_crisis_signals(df)
     if crisis_data["score"] > 0:
-        c_color = {"critical":"ðŸ”´","high":"ðŸŸ ","medium":"ðŸŸ¡","low":"ðŸŸ¢"}.get(crisis_data["severity"],"âšª")
+        c_color = {"critical":"[CRITICO]","high":"[ALTO]","medium":"[MEDIO]","low":"[BAJO]"}.get(crisis_data["severity"],"[INFO]")
         st.header(f"{c_color} Alerta de Crisis")
         col1, col2 = st.columns([1,3])
         col1.metric("Score Crisis", f"{crisis_data['score']}/100")
         with col2:
             for s in crisis_data["signals"]:
-                st.write(f"â€¢ {s}")
+                st.write(f"- {s}")
 
         if not crisis_data["crisis_posts"].empty:
-            st.warning("âš ï¸ Se han detectado los siguientes posts conflictivos:")
+            st.warning("Se han detectado los siguientes posts conflictivos:")
             cols_to_show = ["created_at", "username", "text", "likes", "url"]
             cols_existentes = [c for c in cols_to_show if c in crisis_data["crisis_posts"].columns]
             st.dataframe(crisis_data["crisis_posts"][cols_existentes], use_container_width=True)
@@ -1518,7 +1518,7 @@ if df is not None and not df.empty:
             try:
                 crisis_xlsx = df_to_excel_bytes(crisis_data["crisis_posts"])
                 st.download_button(
-                    label="ðŸ“¥ Descargar Posts de Crisis (Excel)",
+                    label="Descargar Posts de Crisis (Excel)",
                     data=crisis_xlsx,
                     file_name="reporte_crisis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1526,18 +1526,18 @@ if df is not None and not df.empty:
                 )
             except Exception as e:
                 log_message(f"Error exportando crisis_posts a Excel: {e}", "error", {"traceback": traceback.format_exc()})
-                st.error("âŒ No se pudo generar el Excel de crisis. Revisa debug logs.")
+                st.error("No se pudo generar el Excel de crisis. Revisa debug logs.")
         st.divider()
 
-    st.header("ðŸ“ˆ Dashboard")
+    st.header("Dashboard")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Posts", len(df))
     k2.metric("Likes", int(df["likes"].sum()) if "likes" in df.columns else 0)
     k3.metric("Comentarios", int(df["comments"].sum()) if "comments" in df.columns else 0)
     k4.metric("Vistas", int(df["views"].sum()) if "views" in df.columns else 0)
 
-    st.header("ðŸ“Š Visualizaciones")
-    tabs = st.tabs(["ðŸ“… Temporal", "ðŸ§  Sentimiento", "ðŸŽ­ Emociones", "ðŸ·ï¸ Temas", "â˜ï¸ Nube"])
+    st.header("Visualizaciones")
+    tabs = st.tabs(["Temporal", "Sentimiento", "Emociones", "Temas", "Nube"])
     current_figures = {}
 
     with tabs[0]:
@@ -1547,7 +1547,7 @@ if df is not None and not df.empty:
                 fig, ax = plt.subplots(figsize=(10,4))
                 dates_str = [str(d) for d in by_day.index]
                 ax.bar(dates_str, by_day.values, color="#2ca02c")
-                ax.set_title("EvoluciÃ³n diaria")
+                ax.set_title("Evolucion diaria")
                 plt.xticks(rotation=45)
                 st.pyplot(fig)
                 current_figures["evolucion"] = fig_to_bytes(fig)
@@ -1557,7 +1557,7 @@ if df is not None and not df.empty:
         if "sentiment" in df.columns:
             c1, c2 = st.columns(2)
             with c1:
-                fig1 = plot_pie_chart(df["sentiment"], "DistribuciÃ³n Sentimiento")
+                fig1 = plot_pie_chart(df["sentiment"], "Distribucion Sentimiento")
                 if fig1:
                     st.pyplot(fig1)
                     current_figures["sentimiento_pie"] = fig_to_bytes(fig1)
@@ -1573,7 +1573,7 @@ if df is not None and not df.empty:
         if "emotion" in df.columns:
             c1, c2 = st.columns(2)
             with c1:
-                fig3 = plot_pie_chart(df["emotion"], "DistribuciÃ³n Emociones")
+                fig3 = plot_pie_chart(df["emotion"], "Distribucion Emociones")
                 if fig3:
                     st.pyplot(fig3)
                     current_figures["emociones_pie"] = fig_to_bytes(fig3)
@@ -1591,7 +1591,7 @@ if df is not None and not df.empty:
             st.bar_chart(pd.Series(topics))
             fig_t, ax_t = plt.subplots()
             ax_t.bar(list(topics.keys()), list(topics.values()))
-            ax_t.set_title("Top TÃ³picos")
+            ax_t.set_title("Top Topicos")
             plt.xticks(rotation=45)
             current_figures["top_topicos"] = fig_to_bytes(fig_t)
             plt.close(fig_t)
@@ -1608,14 +1608,14 @@ if df is not None and not df.empty:
     st.session_state["report_figures"] = current_figures
     st.divider()
 
-    st.header("ðŸ“§ Enviar Reporte")
-    with st.expander("ConfiguraciÃ³n de EnvÃ­o", expanded=True):
+    st.header("Enviar Reporte")
+    with st.expander("Configuracion de Envio", expanded=True):
         email_to = st.text_input("Destinatario", placeholder="jp@empresa.com")
         if st.button("Enviar Reporte Completo", use_container_width=True):
             if not email_to:
                 st.error("Ingresa un correo.")
             elif not st.session_state["report_figures"]:
-                st.warning("Genera grÃ¡ficos primero.")
+                st.warning("Genera graficos primero.")
             else:
                 with st.spinner("Enviando..."):
                     query_val = topic or username_input or hashtags_str
@@ -1624,16 +1624,16 @@ if df is not None and not df.empty:
                     email_body = (
                         f"REPORTE SOCIAL LISTENING PRO\n"
                         f"============================\n"
-                        f"Fecha de generaciÃ³n: {fecha_reporte}\n"
+                        f"Fecha de generacion: {fecha_reporte}\n"
                         f"Plataforma: {platform}\n"
-                        f"BÃºsqueda: {query_val}\n\n"
+                        f"Busqueda: {query_val}\n\n"
                         f"RESUMEN EJECUTIVO (IA):\n"
                         f"{ai_summary if ai_summary else 'No disponible.'}\n\n"
                         f"METRICAS GENERALES:\n"
                         f"- Total Posts: {len(df)}\n"
                         f"- Interacciones Totales: {int(df.get('likes',0).sum() + df.get('comments',0).sum())}\n"
                         f"- Visualizaciones: {int(df.get('views',0).sum())}\n\n"
-                        f"Se adjuntan los datos detallados (Excel/CSV) y los grÃ¡ficos del dashboard.\n"
+                        f"Se adjuntan los datos detallados (Excel/CSV) y los graficos del dashboard.\n"
                     )
 
                     success, msg = send_email_report(
@@ -1645,19 +1645,21 @@ if df is not None and not df.empty:
                         st.session_state["report_figures"]
                     )
                     if success:
-                        st.success(f"âœ… {msg}")
+                        st.success(msg)
                     else:
-                        st.error(f"âŒ {msg}")
+                        st.error(msg)
 
     c1, c2 = st.columns(2)
-    c1.download_button("ðŸ“¥ Excel", df_to_excel_bytes(df), "reporte.xlsx")
-    c2.download_button("ðŸ“¥ CSV", df_to_csv_bytes(df), "reporte.csv")
+    c1.download_button("Excel", df_to_excel_bytes(df), "reporte.xlsx")
+    c2.download_button("CSV", df_to_csv_bytes(df), "reporte.csv")
 
 # =============================================================================
 # FOOTER LOGS
 # =============================================================================
 
 if st.session_state.get("logs"):
-    with st.expander("ðŸ“‹ Logs de EjecuciÃ³n", expanded=False):
+    with st.expander("Logs de Ejecucion", expanded=False):
         for log in st.session_state["logs"][-50:]:
             st.text(log)
+
+
