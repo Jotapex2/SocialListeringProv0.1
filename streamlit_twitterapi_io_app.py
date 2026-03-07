@@ -2,7 +2,7 @@
 # Optimizado por "JP" Persona - V6.8.2 (IG keyword fixed + FB search actor + Apify v2 robust runs + Excel export dedup)
 # UI: EspaÃ±ol | Feat: Stealth Credentials + Email Reporting + AI Analyst (Specific Citations) + Debug Tools
 
-import os, re, io, time, json, pytz, requests, pandas as pd, streamlit as st
+import os, re, io, time, json, random, pytz, requests, pandas as pd, streamlit as st
 import matplotlib.pyplot as plt
 import asyncio
 import httpx
@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Any
 from collections import Counter
 import logging
 import traceback
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 # =============================================================================
 # CONFIG
@@ -28,7 +29,7 @@ import traceback
 
 st.set_page_config(page_title="SocialListening Pro", page_icon="SLP", layout="wide")
 
-BUILD_TAG = "JP Release v6.8.2 - IG keyword fixed + FB search actor + Apify v2 robust runs + Excel export dedup"
+BUILD_TAG = "JP Release v6.9.0 - FB/Apify resiliency + dedup + run metrics + date filtering controls"
 st.caption(f"Build: {BUILD_TAG}")
 
 logging.basicConfig(
@@ -49,6 +50,9 @@ APIFY_ACTOR_FB_PAGES   = "apify/facebook-posts-scraper"              # por usuar
 
 # Polling / sync improvements
 ASYNC_POLL_INTERVAL = 3
+APIFY_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+APIFY_RETRY_MAX_ATTEMPTS = 4
+APIFY_RETRY_BASE_DELAY = 1.5
 
 load_dotenv()
 
@@ -66,7 +70,8 @@ default_state = {
     "debug_mode": False,
     "debug_logs": [],
     "api_responses": {},
-    "execution_times": {}
+    "execution_times": {},
+    "apify_runs": []
 }
 for k, v in default_state.items():
     if k not in st.session_state:
@@ -200,11 +205,15 @@ def render_debug_panel():
 
     with debug_tabs[3]:
         responses = st.session_state.get("api_responses", {})
+        apify_runs = st.session_state.get("apify_runs", [])
+        if apify_runs:
+            st.caption(f"Apify runs registrados: {len(apify_runs)}")
+            st.dataframe(pd.DataFrame(apify_runs).tail(20), use_container_width=True, height=180)
         if responses:
             selected_api = st.selectbox("API", list(responses.keys()))
             if selected_api:
                 st.json(responses[selected_api])
-        else:
+        elif not apify_runs:
             st.info("No hay respuestas de API registradas")
 
 # =============================================================================
@@ -605,6 +614,108 @@ def apify_headers(token: str) -> Dict[str, str]:
     # MÃ¡s seguro que ?token= en URL (evita leaks en logs/historial)
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+def apify_timeout_for_limit(limit_hint: int, base_secs: int = 180, per_100_items: int = 20, max_secs: int = 900) -> int:
+    safe_limit = max(1, int(limit_hint or 1))
+    return min(max_secs, base_secs + ((safe_limit - 1) // 100) * per_100_items)
+
+def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+        return seconds if seconds >= 0 else None
+    except Exception:
+        return None
+
+def apify_request_with_retry(
+    method: str,
+    url: str,
+    token: str,
+    timeout: int,
+    params: Optional[Dict[str, Any]] = None,
+    json_payload: Optional[Dict[str, Any]] = None,
+    op_name: str = "apify_request"
+) -> Optional[requests.Response]:
+    last_response: Optional[requests.Response] = None
+    for attempt in range(1, APIFY_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=apify_headers(token),
+                params=params,
+                json=json_payload,
+                timeout=timeout
+            )
+            last_response = response
+            if response.status_code not in APIFY_RETRYABLE_STATUS:
+                return response
+
+            if attempt == APIFY_RETRY_MAX_ATTEMPTS:
+                break
+
+            retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+            backoff = APIFY_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            wait_time = retry_after if retry_after is not None else (backoff + random.uniform(0, 0.75))
+            log_message(
+                f"{op_name}: status {response.status_code}, reintento {attempt}/{APIFY_RETRY_MAX_ATTEMPTS} en {wait_time:.2f}s",
+                "warning"
+            )
+            time.sleep(wait_time)
+        except requests.RequestException as exc:
+            if attempt == APIFY_RETRY_MAX_ATTEMPTS:
+                log_message(f"{op_name}: excepcion final {exc}", "error")
+                break
+            backoff = APIFY_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.75)
+            log_message(
+                f"{op_name}: excepcion {exc}, reintento {attempt}/{APIFY_RETRY_MAX_ATTEMPTS} en {backoff:.2f}s",
+                "warning"
+            )
+            time.sleep(backoff)
+    return last_response
+
+def canonicalize_post_url(raw_url: Optional[str]) -> Optional[str]:
+    if not raw_url:
+        return None
+    try:
+        parsed = urlparse(str(raw_url).strip())
+        if not parsed.scheme or not parsed.netloc:
+            return str(raw_url).strip()
+        clean_query = [
+            (k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if not k.lower().startswith("utm_") and k.lower() not in {"fbclid", "ref"}
+        ]
+        normalized_path = parsed.path.rstrip("/")
+        normalized = parsed._replace(
+            scheme=parsed.scheme.lower(),
+            netloc=parsed.netloc.lower(),
+            path=normalized_path,
+            query=urlencode(clean_query, doseq=True),
+            fragment=""
+        )
+        return urlunparse(normalized)
+    except Exception:
+        return str(raw_url).strip()
+
+def dedup_normalized_posts(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    unique = []
+    for row in rows:
+        row_id = str(row.get("id") or "").strip()
+        row_url = canonicalize_post_url(row.get("url"))
+        text = str(row.get("text") or "").strip().lower()
+        created = str(row.get("created_at") or "").strip()
+        if not (row_id or row_url or text or created):
+            unique.append(row)
+            continue
+        key = (row_id, row_url, text[:120], created)
+        if key in seen:
+            continue
+        seen.add(key)
+        row["url"] = row_url or row.get("url")
+        unique.append(row)
+    return unique
+
 @measure_time("apify_dataset_items_paginated")
 def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int = 5000) -> List[Dict]:
     """Descarga items con paginaciÃ³n limit/offset (robusto)."""
@@ -619,9 +730,18 @@ def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int 
             "limit": page_limit,
             "offset": offset
         }
-        r = requests.get(url, headers=apify_headers(token), params=params, timeout=60)
-        if r.status_code != 200:
-            log_message(f"Error dataset items {dataset_id}: {r.status_code}", "warning", {"text": r.text[:300]})
+        r = apify_request_with_retry(
+            method="GET",
+            url=url,
+            token=token,
+            timeout=60,
+            params=params,
+            op_name=f"dataset_items:{dataset_id}"
+        )
+        if r is None or r.status_code != 200:
+            status = r.status_code if r is not None else "no_response"
+            txt = r.text[:300] if r is not None else ""
+            log_message(f"Error dataset items {dataset_id}: {status}", "warning", {"text": txt})
             break
 
         batch = r.json()
@@ -663,21 +783,49 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
 
     actor_path = actor_id.replace("/", "~")
     for i, token in enumerate(valid_tokens):
+        run_metrics = {
+            "actor_id": actor_id,
+            "token_attempt": i + 1,
+            "started_at": datetime.now(SCL_TZ).isoformat(),
+            "status": "NOT_STARTED",
+            "run_id": None,
+            "dataset_id": None,
+            "duration_secs": None,
+            "items_count": 0
+        }
+        started = time.time()
         try:
             url_run = f"https://api.apify.com/v2/acts/{actor_path}/runs"
             log_message(f"Iniciando actor {actor_id} (intento {i+1}/{len(valid_tokens)})", "debug", {"payload": payload})
 
-            r = requests.post(url_run, headers=apify_headers(token), json=payload, timeout=30)
-            if r.status_code not in [200, 201]:
-                log_message(f"Error iniciando actor: {r.status_code}", "warning", {"text": r.text[:300]})
+            r = apify_request_with_retry(
+                method="POST",
+                url=url_run,
+                token=token,
+                timeout=30,
+                json_payload=payload,
+                op_name=f"run_start:{actor_id}"
+            )
+            if r is None or r.status_code not in [200, 201]:
+                status = r.status_code if r is not None else "no_response"
+                txt = r.text[:300] if r is not None else ""
+                log_message(f"Error iniciando actor: {status}", "warning", {"text": txt})
+                run_metrics["status"] = "START_FAILED"
+                run_metrics["duration_secs"] = round(time.time() - started, 2)
+                st.session_state["apify_runs"].append(run_metrics)
                 continue
 
             run_data = r.json().get("data") or r.json().get("data", {})
             run_id = run_data.get("id")
             dataset_id = run_data.get("defaultDatasetId")
+            run_metrics["run_id"] = run_id
+            run_metrics["dataset_id"] = dataset_id
 
             if not run_id:
                 log_message("No vino run_id desde Apify", "error", {"resp": r.text[:500]})
+                run_metrics["status"] = "MISSING_RUN_ID"
+                run_metrics["duration_secs"] = round(time.time() - started, 2)
+                st.session_state["apify_runs"].append(run_metrics)
                 continue
 
             log_message(f"Actor iniciado - Run ID: {run_id}", "info", {"dataset_id": dataset_id})
@@ -689,9 +837,17 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
             while time.time() - start_time < timeout_secs:
                 # waitForFinish reduce polling (mÃ¡x 60s por request)
                 poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
-                r_poll = requests.get(poll_url, headers=apify_headers(token), params={"waitForFinish": 60}, timeout=75)
-                if r_poll.status_code != 200:
-                    log_message(f"Error polling run {run_id}: {r_poll.status_code}", "warning")
+                r_poll = apify_request_with_retry(
+                    method="GET",
+                    url=poll_url,
+                    token=token,
+                    timeout=75,
+                    params={"waitForFinish": 60},
+                    op_name=f"run_poll:{run_id}"
+                )
+                if r_poll is None or r_poll.status_code != 200:
+                    status = r_poll.status_code if r_poll is not None else "no_response"
+                    log_message(f"Error polling run {run_id}: {status}", "warning")
                     time.sleep(ASYNC_POLL_INTERVAL)
                     continue
 
@@ -707,16 +863,36 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
                     break
 
             if status != "SUCCEEDED":
+                run_metrics["status"] = status
+                run_metrics["dataset_id"] = dataset_id
+                run_metrics["duration_secs"] = round(time.time() - started, 2)
+                st.session_state["apify_runs"].append(run_metrics)
                 continue
 
             if not dataset_id:
                 log_message("Run SUCCEEDED pero sin defaultDatasetId", "warning", {"run": final_data})
+                run_metrics["status"] = "SUCCEEDED_NO_DATASET"
+                run_metrics["duration_secs"] = round(time.time() - started, 2)
+                st.session_state["apify_runs"].append(run_metrics)
                 return []
 
-            return apify_dataset_items_paginated(dataset_id, token, limit_total=int(payload.get("maxItems") or payload.get("resultsLimit") or 5000))
+            items = apify_dataset_items_paginated(
+                dataset_id,
+                token,
+                limit_total=int(payload.get("maxItems") or payload.get("resultsLimit") or payload.get("resultsCount") or 5000)
+            )
+            run_metrics["status"] = "SUCCEEDED"
+            run_metrics["dataset_id"] = dataset_id
+            run_metrics["duration_secs"] = round(time.time() - started, 2)
+            run_metrics["items_count"] = len(items)
+            st.session_state["apify_runs"].append(run_metrics)
+            return items
 
         except Exception as e:
             log_message(f"Excepcion en run_apify_actor_v2: {e}", "error", {"traceback": traceback.format_exc()})
+            run_metrics["status"] = "EXCEPTION"
+            run_metrics["duration_secs"] = round(time.time() - started, 2)
+            st.session_state["apify_runs"].append(run_metrics)
             continue
 
     return []
@@ -866,15 +1042,22 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
     """
     if mode == "search":
         log_message(f"Fetching Facebook SEARCH: {query}", "info")
+        effective_limit = max(1, min(100, int(limit)))
+        if effective_limit < int(limit):
+            log_message(
+                f"Facebook SEARCH permite maximo 100 resultados por ejecucion, se ajusta de {limit} a {effective_limit}",
+                "warning"
+            )
         payload = {
             "query": query,
-            "resultsCount": min(100, int(limit)),  # actor schema: 1..100
+            "resultsCount": effective_limit,  # actor schema: 1..100
             "searchType": "latest" if fb_search_type == "latest" else "top"
         }
         if location:
             payload["location"] = location
 
-        items = run_apify_actor_v2(APIFY_ACTOR_FB_SEARCH, tokens, payload, timeout_secs=300)
+        timeout_secs = apify_timeout_for_limit(effective_limit)
+        items = run_apify_actor_v2(APIFY_ACTOR_FB_SEARCH, tokens, payload, timeout_secs=timeout_secs)
 
         # Normalizamos campos tÃ­picos que vienen de distintos actores
         normalized = []
@@ -889,6 +1072,7 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
                 "url": i.get("url") or i.get("postUrl") or i.get("permalink"),
                 "created_at": i.get("time") or i.get("timestamp") or i.get("publishedAt"),
             })
+        normalized = dedup_normalized_posts(normalized)
         return normalize_common_optimized(normalized, "facebook")
 
     # mode == "user"
@@ -907,7 +1091,8 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
             urls.append({"url": f"https://www.facebook.com/{u}"})
     payload["startUrls"] = urls
 
-    items = run_apify_actor_v2(actor, tokens, payload, timeout_secs=300)
+    timeout_secs = apify_timeout_for_limit(int(limit))
+    items = run_apify_actor_v2(actor, tokens, payload, timeout_secs=timeout_secs)
 
     normalized = []
     for i in items:
@@ -921,6 +1106,7 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
             "url": i.get("url") or i.get("postUrl"),
             "created_at": i.get("time") or i.get("timestamp")
         })
+    normalized = dedup_normalized_posts(normalized)
     return normalize_common_optimized(normalized, "facebook")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -943,7 +1129,12 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 "getReels": True,
                 "maxItems": int(limit)
             }
-            batch = run_apify_actor_v2(APIFY_ACTOR_IG_HASHTAG, tokens, payload, timeout_secs=300)
+            batch = run_apify_actor_v2(
+                APIFY_ACTOR_IG_HASHTAG,
+                tokens,
+                payload,
+                timeout_secs=apify_timeout_for_limit(int(limit))
+            )
             if batch:
                 items.extend(batch)
             if len(items) >= int(limit):
@@ -958,7 +1149,12 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 "getReels": True,
                 "maxItems": int(limit)
             }
-            items = run_apify_actor_v2(APIFY_ACTOR_IG_HASHTAG, tokens, payload, timeout_secs=300)
+            items = run_apify_actor_v2(
+                APIFY_ACTOR_IG_HASHTAG,
+                tokens,
+                payload,
+                timeout_secs=apify_timeout_for_limit(int(limit))
+            )
 
         if items:
             # Dedup por id/url para evitar repetidos al combinar keywords
@@ -990,7 +1186,12 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
             "getReels": True,
             "maxItems": int(limit)
         }
-        items = run_apify_actor_v2(APIFY_ACTOR_IG_HASHTAG, tokens, payload, timeout_secs=300)
+        items = run_apify_actor_v2(
+            APIFY_ACTOR_IG_HASHTAG,
+            tokens,
+            payload,
+            timeout_secs=apify_timeout_for_limit(int(limit))
+        )
         return normalize_common_optimized(items, "instagram")
 
     # mode == "user"
@@ -1000,7 +1201,12 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
         "resultsLimit": int(limit),
         "resultsType": "posts"
     }
-    items = run_apify_actor_v2(APIFY_ACTOR_IG_POSTS, tokens, payload, timeout_secs=300)
+    items = run_apify_actor_v2(
+        APIFY_ACTOR_IG_POSTS,
+        tokens,
+        payload,
+        timeout_secs=apify_timeout_for_limit(int(limit))
+    )
     return normalize_common_optimized(items, "instagram")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1011,14 +1217,19 @@ def fetch_tiktok_cached(tokens: List[str], query: str, limit: int, mode: str) ->
         payload["usernames"] = [u.strip().lstrip("@") for u in query.split(",") if u.strip()]
     else:
         payload["hashtags"] = [h.strip().replace("#", "") for h in query.split(",") if h.strip()]
-    items = run_apify_actor_v2("clockworks/tiktok-scraper", tokens, payload, timeout_secs=300)
+    items = run_apify_actor_v2(
+        "clockworks/tiktok-scraper",
+        tokens,
+        payload,
+        timeout_secs=apify_timeout_for_limit(int(limit))
+    )
     return normalize_common_optimized(items, "tiktok")
 
 # =============================================================================
 # FILTRO FECHAS
 # =============================================================================
 
-def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]) -> pd.DataFrame:
+def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date], include_undated: bool = False) -> pd.DataFrame:
     if df is None or df.empty:
         return df
     if "fecha_cl" not in df.columns:
@@ -1059,9 +1270,15 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
 
         mask = pd.Series(True, index=df_work.index)
         if d1_str:
-            mask &= ((df_work["_fecha_str"] >= d1_str) | (df_work["_fecha_str"].isna()))
+            if include_undated:
+                mask &= ((df_work["_fecha_str"] >= d1_str) | (df_work["_fecha_str"].isna()))
+            else:
+                mask &= (df_work["_fecha_str"] >= d1_str)
         if d2_str:
-            mask &= ((df_work["_fecha_str"] <= d2_str) | (df_work["_fecha_str"].isna()))
+            if include_undated:
+                mask &= ((df_work["_fecha_str"] <= d2_str) | (df_work["_fecha_str"].isna()))
+            else:
+                mask &= (df_work["_fecha_str"] <= d2_str)
 
         filtered = df.loc[mask].copy()
         removed = len(df) - len(filtered)
@@ -1077,6 +1294,7 @@ def enforce_date_window(df: pd.DataFrame, d1: Optional[date], d2: Optional[date]
                     "removed": removed,
                     "d1": d1_str,
                     "d2": d2_str,
+                    "include_undated": include_undated,
                     "null_dates": df_work["_fecha_str"].isna().sum(),
                     "fecha_cl_dtype": str(df["fecha_cl"].dtype),
                     "sample_dates": df_work["_fecha_str"].dropna().head(3).tolist()
@@ -1309,7 +1527,10 @@ if d1 and d2 and d1 > d2:
     st.sidebar.error("Fecha 'Desde' no puede ser posterior a 'Hasta'")
 
 limit = st.sidebar.slider("Limite de posts", 50, 2000, 200)
+if platform == "Facebook" and search_mode == "Por tematica" and limit > 100:
+    st.sidebar.warning("Facebook por tematica permite maximo 100 posts por ejecucion. Se usara 100.")
 max_words = st.sidebar.slider("Max. palabras nube", 50, 500, 200)
+include_undated_posts = st.sidebar.checkbox("Incluir posts sin fecha", value=False)
 
 sentiment = st.sidebar.checkbox("Analizar Sentimiento", value=True)
 emotions = st.sidebar.checkbox("Analizar Emociones", value=False)
@@ -1371,6 +1592,7 @@ if run_btn:
     st.session_state["api_responses"] = {}
     st.session_state["report_figures"] = {}
     st.session_state["ai_summary"] = None
+    st.session_state["apify_runs"] = []
 
     log_message("Iniciando busqueda", "info")
     prog = st.progress(0.0, text="Iniciando...")
@@ -1422,7 +1644,7 @@ if run_btn:
         prog.progress(0.3, text="Aplicando filtros de fecha...")
 
         try:
-            df = enforce_date_window(df, d1, d2)
+            df = enforce_date_window(df, d1, d2, include_undated=include_undated_posts)
         except Exception as date_error:
             log_message(
                 f"Error al filtrar fechas: {date_error}",

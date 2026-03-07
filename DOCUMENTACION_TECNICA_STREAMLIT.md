@@ -78,8 +78,10 @@ Archivos de soporte:
 - Parsing defensivo del resultado (`POS/NEG/NEU`, emociones validas).
 
 ### 3.4 Apify
-- `run_apify_actor_v2(...)` ejecuta actor, hace polling robusto, maneja estados de run.
+- `run_apify_actor_v2(...)` ejecuta actor, hace polling robusto, maneja estados de run y registra metricas por run (`status`, `run_id`, `dataset_id`, duracion, items).
 - `apify_dataset_items_paginated(...)` pagina items por dataset hasta limite.
+- Resiliencia HTTP: retry exponencial con jitter para `POST /runs`, `GET /actor-runs` y `GET /datasets/:id/items` (incluye manejo de `Retry-After`).
+- Timeout dinamico por volumen (`apify_timeout_for_limit(...)`) para Facebook/Instagram/TikTok.
 - Rotacion de tokens soportada por lista de tokens.
 
 ### 3.5 NLP local ligero
@@ -176,6 +178,10 @@ Nota: en Streamlit Cloud no necesitas `.env` para produccion.
 8. Cobertura de pruebas inexistente
 - No hay suite automatizada para fetchers, normalizacion, filtros, IA, export.
 
+9. Facebook Search con limite efectivo del actor
+- `scraper_one/facebook-posts-search` permite maximo 100 resultados por ejecucion.
+- La UI ahora advierte y aplica ajuste automatico cuando el slider supera 100 en "Por tematica".
+
 ---
 
 ## 7) Mejoras recomendadas para produccion (Streamlit Cloud)
@@ -261,3 +267,18 @@ Se aplicaron mejoras orientadas a despliegue en Streamlit Cloud:
   - si `ENABLE_DEBUG_TOOLS=true`, aparece control Debug/Admin en sidebar para alternar:
     - modo rapido (muestra)
     - modo precision (todos los posts)
+
+## 11) Mejoras aplicadas (2026-03-07) - Facebook/Apify
+- Retry/backoff robusto para Apify:
+  - estrategia exponencial con jitter para errores transitorios (`429/5xx/timeout`) en inicio de actor, polling y descarga de dataset.
+  - soporte de header `Retry-After`.
+- Metricas de runs Apify:
+  - se agrega `st.session_state["apify_runs"]` con actor, estado final, IDs, duracion e items.
+  - visible en Debug Tools -> tab `APIs`.
+- Deduplicacion en Facebook:
+  - dedup por clave compuesta (`id`, URL canonicalizada, texto parcial y fecha) antes de normalizar.
+  - reduce sobreconteo en KPIs y analitica.
+- Facebook "Por tematica":
+  - ajuste explicito de limite a 100 por restriccion del actor y aviso en sidebar.
+- Filtro temporal configurable:
+  - nuevo control `Incluir posts sin fecha` (default `False`) para decidir si se conservan registros con `fecha_cl` nula.

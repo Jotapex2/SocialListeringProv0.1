@@ -1,8 +1,11 @@
-# SocialListeningPro — X + Instagram + Facebook + TikTok
+# SocialListeningPro - X + Instagram + Facebook + TikTok
 - X (Twitter) via twitterapi.io (free-tier pacing)
 - IG/FB/TikTok via Apify Store actors (usa APIFY_TOKEN)
-- Visualizaciones, sentimiento en español, export CSV/Excel con fix de timezone
+- Visualizaciones, sentimiento en espanol, export CSV/Excel con fix de timezone
 - Modo dev con live-reload (docker-compose.dev.yml)
+- Apify con retry/backoff y metricas de runs (Debug Tools)
+- Facebook por tematica: limite efectivo 100 por ejecucion (con aviso en UI)
+- Filtro temporal configurable: opcion `Incluir posts sin fecha`
 
 ## Pasos local
 ```powershell
@@ -28,5 +31,6 @@ Configura estos secrets en la app:
 
 Nota:
 - Si `ENABLE_DEBUG_TOOLS=true`, aparece un switch de Debug/Admin para alternar en UI entre:
-  - `⚡ IA modo rápido` (muestra priorizada por engagement)
-  - modo precisión (analiza todos los posts)
+  - `IA modo rapido` (muestra priorizada por engagement)
+  - modo precision (analiza todos los posts)
+- En Facebook `Por tematica`, si el slider supera 100, la app ajusta automaticamente a 100 (restriccion del actor).
