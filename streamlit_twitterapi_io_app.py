@@ -71,7 +71,9 @@ default_state = {
     "debug_logs": [],
     "api_responses": {},
     "execution_times": {},
-    "apify_runs": []
+    "apify_runs": [],
+    "search_active": False,
+    "cancel_requested": False
 }
 for k, v in default_state.items():
     if k not in st.session_state:
@@ -93,6 +95,9 @@ REQUIRE_LOGIN = env_bool("REQUIRE_LOGIN", True)
 ENABLE_DEBUG_TOOLS = env_bool("ENABLE_DEBUG_TOOLS", False)
 AI_FAST_MODE = env_bool("AI_FAST_MODE", True)
 AI_MAX_TEXTS = int(env("AI_MAX_TEXTS") or 300)
+
+class SearchCancelled(Exception):
+    pass
 
 def log_message(msg: str, level: str = "info", debug_data: Optional[Dict] = None):
     timestamp = datetime.now(SCL_TZ).strftime("%H:%M:%S.%f")[:-3]
@@ -118,6 +123,25 @@ def log_message(msg: str, level: str = "info", debug_data: Optional[Dict] = None
         logger.debug(msg)
     else:
         logger.info(msg)
+
+def request_stop_search():
+    st.session_state["cancel_requested"] = True
+
+def reset_search_controls():
+    st.session_state["search_active"] = False
+    st.session_state["cancel_requested"] = False
+
+def ensure_search_not_cancelled():
+    if st.session_state.get("cancel_requested"):
+        raise SearchCancelled("Busqueda detenida por el usuario.")
+
+def sleep_with_cancel(seconds: float, step: float = 0.25):
+    remaining = max(0.0, float(seconds or 0))
+    while remaining > 0:
+        ensure_search_not_cancelled()
+        nap = min(step, remaining)
+        time.sleep(nap)
+        remaining -= nap
 
 def measure_time(func_name: str):
     def decorator(func):
@@ -340,7 +364,7 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
             output.seek(0)
             return output.getvalue()
 
-        safe_df = sanitize_df_for_excel(df)
+        safe_df = sanitize_df_for_excel(dedup_posts_df(df))
 
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             safe_df.to_excel(writer, index=False, sheet_name='Datos')
@@ -367,7 +391,7 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     if df is None:
         return b""
-    safe_df = df.copy()
+    safe_df = dedup_posts_df(df)
     for col in safe_df.columns:
         try:
             if is_datetime64tz_dtype(safe_df[col]):
@@ -638,6 +662,7 @@ def apify_request_with_retry(
 ) -> Optional[requests.Response]:
     last_response: Optional[requests.Response] = None
     for attempt in range(1, APIFY_RETRY_MAX_ATTEMPTS + 1):
+        ensure_search_not_cancelled()
         try:
             response = requests.request(
                 method=method.upper(),
@@ -661,7 +686,7 @@ def apify_request_with_retry(
                 f"{op_name}: status {response.status_code}, reintento {attempt}/{APIFY_RETRY_MAX_ATTEMPTS} en {wait_time:.2f}s",
                 "warning"
             )
-            time.sleep(wait_time)
+            sleep_with_cancel(wait_time)
         except requests.RequestException as exc:
             if attempt == APIFY_RETRY_MAX_ATTEMPTS:
                 log_message(f"{op_name}: excepcion final {exc}", "error")
@@ -671,7 +696,7 @@ def apify_request_with_retry(
                 f"{op_name}: excepcion {exc}, reintento {attempt}/{APIFY_RETRY_MAX_ATTEMPTS} en {backoff:.2f}s",
                 "warning"
             )
-            time.sleep(backoff)
+            sleep_with_cancel(backoff)
     return last_response
 
 def canonicalize_post_url(raw_url: Optional[str]) -> Optional[str]:
@@ -716,6 +741,37 @@ def dedup_normalized_posts(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         unique.append(row)
     return unique
 
+def dedup_posts_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    if df.empty:
+        return df.copy()
+
+    seen = set()
+    keep_indices = []
+
+    for idx, row in df.iterrows():
+        row_id = str(row.get("id") or "").strip()
+        row_url = canonicalize_post_url(row.get("url"))
+        text = str(row.get("text") or "").strip().lower()
+        created = str(row.get("created_at") or "").strip()
+
+        if not (row_id or row_url or text or created):
+            keep_indices.append(idx)
+            continue
+
+        key = (row_id, row_url, text[:120], created)
+        if key in seen:
+            continue
+
+        seen.add(key)
+        keep_indices.append(idx)
+
+    out = df.loc[keep_indices].copy()
+    if "url" in out.columns:
+        out["url"] = out["url"].apply(canonicalize_post_url)
+    return out
+
 @measure_time("apify_dataset_items_paginated")
 def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int = 5000) -> List[Dict]:
     """Descarga items con paginaciÃ³n limit/offset (robusto)."""
@@ -723,6 +779,7 @@ def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int 
     offset = 0
     page_limit = 1000  # Apify puede capear; se ajusta por respuesta
     while True:
+        ensure_search_not_cancelled()
         url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
         params = {
             "format": "json",
@@ -783,6 +840,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
 
     actor_path = actor_id.replace("/", "~")
     for i, token in enumerate(valid_tokens):
+        ensure_search_not_cancelled()
         run_metrics = {
             "actor_id": actor_id,
             "token_attempt": i + 1,
@@ -835,6 +893,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
             final_data = None
 
             while time.time() - start_time < timeout_secs:
+                ensure_search_not_cancelled()
                 # waitForFinish reduce polling (mÃ¡x 60s por request)
                 poll_url = f"https://api.apify.com/v2/actor-runs/{run_id}"
                 r_poll = apify_request_with_retry(
@@ -848,7 +907,7 @@ def run_apify_actor_v2(actor_id: str, tokens: List[str], payload: Dict, timeout_
                 if r_poll is None or r_poll.status_code != 200:
                     status = r_poll.status_code if r_poll is not None else "no_response"
                     log_message(f"Error polling run {run_id}: {status}", "warning")
-                    time.sleep(ASYNC_POLL_INTERVAL)
+                    sleep_with_cancel(ASYNC_POLL_INTERVAL)
                     continue
 
                 final_data = r_poll.json().get("data", {})
@@ -982,6 +1041,7 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
     max_loops = (limit // 20) + 5
 
     for loop_num in range(max_loops):
+        ensure_search_not_cancelled()
         params = {"query": query, "queryType": "Latest"}
         if cursor:
             params["cursor"] = cursor
@@ -1030,8 +1090,12 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
             log_message(f"Excepcion en fetch_x: {e}", "error", {"traceback": traceback.format_exc()})
             break
 
-    log_message(f"Total tweets obtenidos: {len(all_rows)}", "info")
-    return normalize_common_optimized(all_rows, "x")
+    deduped_rows = dedup_normalized_posts(all_rows)
+    removed = len(all_rows) - len(deduped_rows)
+    if removed > 0:
+        log_message(f"X dedup elimino {removed} posts duplicados", "info")
+    log_message(f"Total tweets obtenidos: {len(deduped_rows)}", "info")
+    return normalize_common_optimized(deduped_rows, "x")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, location: Optional[str] = None, fb_search_type: str = "latest") -> pd.DataFrame:
@@ -1123,6 +1187,7 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
         items: List[Dict] = []
 
         for kw in keywords:
+            ensure_search_not_cancelled()
             payload = {
                 "keyword": kw,
                 "getPosts": True,
@@ -1176,6 +1241,7 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
         # Este actor espera startUrls como lista de strings
         start_urls = []
         for h in query.split(","):
+            ensure_search_not_cancelled()
             h = h.strip().replace("#", "")
             if not h:
                 continue
@@ -1465,12 +1531,12 @@ def compose_query_x_user(username: str, lang: str, exclude_rt: bool, exclude_rep
 st.title("Social Listening Pro - X + Instagram + Facebook + TikTok")
 st.markdown("**Analisis avanzado con deteccion de crisis, sentimiento y reporte por email**")
 
-st.sidebar.header("Configuracion")
+st.sidebar.header("⚙️ Configuracion")
 
 st.sidebar.markdown("---")
 if ENABLE_DEBUG_TOOLS:
     debug_mode = st.sidebar.checkbox(
-        "Modo Debug",
+        "🪲 Modo Debug",
         value=st.session_state.get("debug_mode", False),
         key="toggle_debug_mode"
     )
@@ -1478,17 +1544,17 @@ else:
     debug_mode = False
 st.session_state["debug_mode"] = debug_mode
 if debug_mode:
-    st.sidebar.info("Modo Debug activo. Ver panel abajo.")
+    st.sidebar.info("🪲 Modo Debug activo. Ver panel abajo.")
 st.sidebar.markdown("---")
 
-platform = st.sidebar.selectbox("Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
+platform = st.sidebar.selectbox("🌐 Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
 
 if platform == "Instagram":
-    search_mode = st.sidebar.radio("Modo", ["Por tematica (hashtags)", "Por tematica (busqueda IG)", "Por usuario"])
+    search_mode = st.sidebar.radio("🔎 Modo", ["Por tematica (hashtags)", "Por tematica (busqueda IG)", "Por usuario"])
 elif platform == "Facebook":
-    search_mode = st.sidebar.radio("Modo", ["Por tematica", "Por usuario"])
+    search_mode = st.sidebar.radio("🔎 Modo", ["Por tematica", "Por usuario"])
 else:
-    search_mode = st.sidebar.radio("Modo", ["Por tematica", "Por usuario"])
+    search_mode = st.sidebar.radio("🔎 Modo", ["Por tematica", "Por usuario"])
 
 topic = ""
 username_input = ""
@@ -1496,57 +1562,57 @@ hashtags_str = ""
 
 if search_mode.startswith("Por tematica"):
     if platform == "Instagram" and "hashtags" in search_mode:
-        hashtags_str = st.sidebar.text_input("Hashtag(s) (sin #, separado por comas)")
+        hashtags_str = st.sidebar.text_input("#️⃣ Hashtag(s) (sin #, separado por comas)")
     else:
-        topic = st.sidebar.text_input("Tema / consulta")
+        topic = st.sidebar.text_input("🧠 Tema / consulta")
 else:
-    username_input = st.sidebar.text_input("Usuario(s) (separar por coma)")
+    username_input = st.sidebar.text_input("👤 Usuario(s) (separar por coma)")
 
-lang = st.sidebar.selectbox("Idioma (solo X)", ["", "es", "en", "pt"], index=1)
+lang = st.sidebar.selectbox("🗣️ Idioma (solo X)", ["", "es", "en", "pt"], index=1)
 col1, col2 = st.sidebar.columns(2)
-exclude_rt = col1.checkbox("Excluir RTs [X]", value=True)
-exclude_repl = col2.checkbox("Excluir respuestas [X]", value=True)
-filter_chile = st.sidebar.checkbox("Filtrar solo Chile (X)")
+exclude_rt = col1.checkbox("🔁 Excluir RTs [X]", value=True)
+exclude_repl = col2.checkbox("💬 Excluir respuestas [X]", value=True)
+filter_chile = st.sidebar.checkbox("🇨🇱 Filtrar solo Chile (X)")
 
 # Facebook search extras
 fb_search_type = "latest"
 fb_location = None
 if platform == "Facebook" and search_mode == "Por tematica":
-    fb_search_type = st.sidebar.selectbox("FB Search Type", ["latest", "top"], index=0)
-    fb_location = st.sidebar.text_input("FB Location (opcional)", placeholder="Santiago, Chile")
+    fb_search_type = st.sidebar.selectbox("📘 FB Search Type", ["latest", "top"], index=0)
+    fb_location = st.sidebar.text_input("📍 FB Location (opcional)", placeholder="Santiago, Chile")
 
 st.sidebar.divider()
 
 current_date_cl = datetime.now(SCL_TZ).date()
 default_start = current_date_cl - timedelta(days=14)
 
-d1 = st.sidebar.date_input("Desde", value=default_start, max_value=current_date_cl, key="date_input_from")
-d2 = st.sidebar.date_input("Hasta", value=current_date_cl, max_value=current_date_cl, min_value=d1 if d1 else None, key="date_input_to")
+d1 = st.sidebar.date_input("📅 Desde", value=default_start, max_value=current_date_cl, key="date_input_from")
+d2 = st.sidebar.date_input("📅 Hasta", value=current_date_cl, max_value=current_date_cl, min_value=d1 if d1 else None, key="date_input_to")
 
 if d1 and d2 and d1 > d2:
     st.sidebar.error("Fecha 'Desde' no puede ser posterior a 'Hasta'")
 
-limit = st.sidebar.slider("Limite de posts", 50, 2000, 200)
+limit = st.sidebar.slider("📦 Limite de posts", 50, 2000, 200)
 if platform == "Facebook" and search_mode == "Por tematica" and limit > 100:
     st.sidebar.warning("Facebook por tematica permite maximo 100 posts por ejecucion. Se usara 100.")
-max_words = st.sidebar.slider("Max. palabras nube", 50, 500, 200)
-include_undated_posts = st.sidebar.checkbox("Incluir posts sin fecha", value=False)
+max_words = st.sidebar.slider("☁️ Max. palabras nube", 50, 500, 200)
+include_undated_posts = st.sidebar.checkbox("🗓️ Incluir posts sin fecha", value=False)
 
-sentiment = st.sidebar.checkbox("Analizar Sentimiento", value=True)
-emotions = st.sidebar.checkbox("Analizar Emociones", value=False)
+sentiment = st.sidebar.checkbox("🙂 Analizar Sentimiento", value=True)
+emotions = st.sidebar.checkbox("🎭 Analizar Emociones", value=False)
 
 ai_fast_mode_runtime = AI_FAST_MODE
 ai_max_texts_runtime = AI_MAX_TEXTS
 if ENABLE_DEBUG_TOOLS and debug_mode:
-    st.sidebar.markdown("### IA (Debug/Admin)")
+    st.sidebar.markdown("### 🤖 IA (Debug/Admin)")
     ai_fast_mode_runtime = st.sidebar.checkbox(
-        "IA modo rapido",
+        "⚡ IA modo rapido",
         value=AI_FAST_MODE,
         help="Si se activa, sentimiento/emociones se calculan sobre una muestra priorizada."
     )
     if ai_fast_mode_runtime:
         ai_max_texts_runtime = st.sidebar.slider(
-            "IA maximo textos",
+            "🧾 IA maximo textos",
             min_value=50,
             max_value=2000,
             value=max(50, min(AI_MAX_TEXTS, 2000)),
@@ -1556,27 +1622,35 @@ if ENABLE_DEBUG_TOOLS and debug_mode:
 
 st.sidebar.divider()
 
-st.sidebar.subheader("Credenciales API")
+st.sidebar.subheader("🔐 Credenciales API")
 
 env_x = env("TWITTERAPI_IO_KEY")
 if env_x:
     api_x = env_x
-    st.sidebar.success("X API cargada desde secrets/config")
+    st.sidebar.success("✅ X API cargada desde secrets/config")
 else:
     api_x = None
-    st.sidebar.error("X API no configurada (define TWITTERAPI_IO_KEY en Streamlit Secrets)")
+    st.sidebar.error("❌ X API no configurada (define TWITTERAPI_IO_KEY en Streamlit Secrets)")
 
 env_apify = env("APIFY_TOKEN")
 if env_apify:
     api_apify = env_apify
-    st.sidebar.success("Apify Token cargado desde secrets/config")
+    st.sidebar.success("✅ Apify Token cargado desde secrets/config")
 else:
     api_apify = None
-    st.sidebar.error("Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
+    st.sidebar.error("❌ Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
 
 st.sidebar.divider()
 
-run_btn = st.sidebar.button("Buscar", type="primary", use_container_width=True)
+if st.session_state.get("search_active"):
+    st.sidebar.warning("⏳ Hay una busqueda en curso.")
+stop_btn = st.sidebar.button(
+    "🛑 Detener busqueda",
+    use_container_width=True,
+    on_click=request_stop_search,
+    disabled=not st.session_state.get("search_active", False)
+)
+run_btn = st.sidebar.button("🚀 Buscar", type="primary", use_container_width=True, disabled=st.session_state.get("search_active", False))
 
 if debug_mode:
     render_debug_panel()
@@ -1585,7 +1659,12 @@ if debug_mode:
 # EJECUCION
 # =============================================================================
 
+if st.session_state.get("cancel_requested") and st.session_state.get("search_active"):
+    st.warning("🛑 Se solicitó detener la busqueda. El proceso se cortara en el siguiente checkpoint.")
+
 if run_btn:
+    st.session_state["search_active"] = True
+    st.session_state["cancel_requested"] = False
     st.session_state["logs"] = []
     st.session_state["debug_logs"] = []
     st.session_state["execution_times"] = {}
@@ -1600,6 +1679,7 @@ if run_btn:
     tokens = [t for t in [api_apify] if t]
 
     try:
+        ensure_search_not_cancelled()
         prog.progress(0.1, text="Obteniendo datos...")
 
         if platform.startswith("X"):
@@ -1642,6 +1722,7 @@ if run_btn:
             df = fetch_tiktok_cached(tokens, q, limit, mode)
 
         prog.progress(0.3, text="Aplicando filtros de fecha...")
+        ensure_search_not_cancelled()
 
         try:
             df = enforce_date_window(df, d1, d2, include_undated=include_undated_posts)
@@ -1654,15 +1735,23 @@ if run_btn:
             st.warning("No se pudo aplicar el filtro de fechas. Mostrando todos los resultados.")
 
         prog.progress(0.4, text="Verificando datos...")
+        ensure_search_not_cancelled()
 
         if df.empty:
             st.warning("No se encontraron resultados.")
             log_message("Busqueda sin resultados", "warning")
             st.stop()
 
+        deduped_df = dedup_posts_df(df)
+        removed_df = len(df) - len(deduped_df)
+        if removed_df > 0:
+            log_message(f"Se eliminaron {removed_df} posts duplicados antes de mostrar/exportar", "info")
+        df = deduped_df
+
         log_message(f"Obtenidos {len(df)} posts", "info")
 
         prog.progress(0.5, text="Procesando IA...")
+        ensure_search_not_cancelled()
 
         if "text" in df.columns:
             ai_idx = select_ai_subset(df, ai_max_texts_runtime, ai_fast_mode_runtime)
@@ -1677,6 +1766,7 @@ if run_btn:
 
             if sentiment:
                 prog.progress(0.6, text="Analizando sentimiento...")
+                ensure_search_not_cancelled()
                 with st.spinner("DeepSeek Sentimiento..."):
                     df["sentiment"] = "NEU"
                     if texts_ai:
@@ -1685,6 +1775,7 @@ if run_btn:
 
             if emotions:
                 prog.progress(0.7, text="Analizando emociones...")
+                ensure_search_not_cancelled()
                 with st.spinner("DeepSeek Emociones..."):
                     df["emotion"] = "NEUTRAL"
                     if texts_ai:
@@ -1692,6 +1783,7 @@ if run_btn:
                         df.loc[ai_idx, "emotion"] = emo_ai
 
             prog.progress(0.8, text="Generando resumen ejecutivo...")
+            ensure_search_not_cancelled()
             with st.spinner("Redactando Resumen Ejecutivo y analizando posts virales..."):
                 query_context = topic or username_input or hashtags_str
                 summary = generate_executive_summary(df, query_context)
@@ -1701,12 +1793,16 @@ if run_btn:
         st.session_state["df"] = df
         log_message("Proceso completado exitosamente", "info")
 
+    except SearchCancelled as e:
+        st.warning(f"🛑 {e}")
+        log_message(str(e), "warning")
     except Exception as e:
         st.error(f"Error critico: {e}")
         log_message(str(e), "error", {"traceback": traceback.format_exc()})
         if st.session_state.get("debug_mode"):
             st.exception(e)
     finally:
+        reset_search_controls()
         prog.empty()
 
 # =============================================================================
@@ -1724,7 +1820,7 @@ if df is not None and not df.empty:
     crisis_data = detect_crisis_signals(df)
     if crisis_data["score"] > 0:
         c_color = {"critical":"[CRITICO]","high":"[ALTO]","medium":"[MEDIO]","low":"[BAJO]"}.get(crisis_data["severity"],"[INFO]")
-        st.header(f"{c_color} Alerta de Crisis")
+        st.header(f"🚨 {c_color} Alerta de Crisis")
         col1, col2 = st.columns([1,3])
         col1.metric("Score Crisis", f"{crisis_data['score']}/100")
         with col2:
@@ -1740,7 +1836,7 @@ if df is not None and not df.empty:
             try:
                 crisis_xlsx = df_to_excel_bytes(crisis_data["crisis_posts"])
                 st.download_button(
-                    label="Descargar Posts de Crisis (Excel)",
+                    label="📥 Descargar Posts de Crisis (Excel)",
                     data=crisis_xlsx,
                     file_name="reporte_crisis.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1751,15 +1847,15 @@ if df is not None and not df.empty:
                 st.error("No se pudo generar el Excel de crisis. Revisa debug logs.")
         st.divider()
 
-    st.header("Dashboard")
+    st.header("📊 Dashboard")
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Posts", len(df))
     k2.metric("Likes", int(df["likes"].sum()) if "likes" in df.columns else 0)
     k3.metric("Comentarios", int(df["comments"].sum()) if "comments" in df.columns else 0)
     k4.metric("Vistas", int(df["views"].sum()) if "views" in df.columns else 0)
 
-    st.header("Visualizaciones")
-    tabs = st.tabs(["Temporal", "Sentimiento", "Emociones", "Temas", "Nube"])
+    st.header("📈 Visualizaciones")
+    tabs = st.tabs(["📅 Temporal", "🙂 Sentimiento", "🎭 Emociones", "🧩 Temas", "☁️ Nube"])
     current_figures = {}
 
     with tabs[0]:
@@ -1830,10 +1926,10 @@ if df is not None and not df.empty:
     st.session_state["report_figures"] = current_figures
     st.divider()
 
-    st.header("Enviar Reporte")
-    with st.expander("Configuracion de Envio", expanded=True):
-        email_to = st.text_input("Destinatario", placeholder="jp@empresa.com")
-        if st.button("Enviar Reporte Completo", use_container_width=True):
+    st.header("📨 Enviar Reporte")
+    with st.expander("⚙️ Configuracion de Envio", expanded=True):
+        email_to = st.text_input("📬 Destinatario", placeholder="jp@empresa.com")
+        if st.button("📨 Enviar Reporte Completo", use_container_width=True):
             if not email_to:
                 st.error("Ingresa un correo.")
             elif not st.session_state["report_figures"]:
@@ -1872,8 +1968,8 @@ if df is not None and not df.empty:
                         st.error(msg)
 
     c1, c2 = st.columns(2)
-    c1.download_button("Excel", df_to_excel_bytes(df), "reporte.xlsx")
-    c2.download_button("CSV", df_to_csv_bytes(df), "reporte.csv")
+    c1.download_button("📗 Excel", df_to_excel_bytes(df), "reporte.xlsx")
+    c2.download_button("🧾 CSV", df_to_csv_bytes(df), "reporte.csv")
 
 # =============================================================================
 # FOOTER LOGS
