@@ -772,6 +772,45 @@ def dedup_posts_df(df: pd.DataFrame) -> pd.DataFrame:
         out["url"] = out["url"].apply(canonicalize_post_url)
     return out
 
+def _ig_has_post_payload(item: Dict[str, Any]) -> bool:
+    """Detecta si un item de Instagram contiene datos reales de post."""
+    if not isinstance(item, dict):
+        return False
+
+    node = item.get("node")
+    if isinstance(node, dict):
+        return _ig_has_post_payload(node)
+
+    if item.get("shortCode") or item.get("shortcode") or item.get("code"):
+        return True
+
+    url = str(item.get("url") or item.get("link") or item.get("postUrl") or "")
+    if "/p/" in url or "/reel/" in url:
+        return True
+
+    for key in (
+        "caption", "text", "title", "description", "ownerUsername", "authorUsername",
+        "username", "likesCount", "likeCount", "commentsCount", "commentCount",
+        "videoPlayCount", "playCount", "timestamp", "takenAt", "publishedTime",
+        "takenAtTimestamp", "taken_at_timestamp"
+    ):
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            return True
+
+    return False
+
+def _ig_is_demo_only_payload(items: List[Dict[str, Any]]) -> bool:
+    """Detecta respuestas placeholder/demo del actor de Instagram."""
+    if not items:
+        return False
+
+    demo_items = [it for it in items if isinstance(it, dict) and bool(it.get("demo"))]
+    if len(demo_items) != len(items):
+        return False
+
+    return not any(_ig_has_post_payload(it) for it in demo_items)
+
 @measure_time("apify_dataset_items_paginated")
 def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int = 5000) -> List[Dict]:
     """Descarga items con paginaciÃ³n limit/offset (robusto)."""
@@ -969,12 +1008,14 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
 
     col_map = {
         "text": ["caption", "description", "title", "text", "message", "postText", "content", "postTextTranslated"],
-        "likes": ["likeCount", "likesCount", "diggCount", "likes", "reactionCount", "likes_count", "like_count"],
+        "likes": ["likeCount", "likesCount", "diggCount", "likes", "reactionCount", "reactions_count", "reactionLikeCount", "likes_count", "like_count"],
         "comments": ["commentCount", "commentsCount", "comments", "comments_count"],
-        "shares": ["shareCount", "retweetCount", "shares", "share_count"],
-        "views": ["playCount", "viewCount", "videoPlayCount", "views", "views_count"],
+        "shares": ["shareCount", "retweetCount", "shares", "share_count", "reshare_count"],
+        "views": ["playCount", "viewCount", "videoPlayCount", "views", "views_count", "viewsCount"],
         "followers": ["followers", "followersCount", "fans", "followerCount", "userFollowers"],
-        "created_at": ["timestamp", "takenAt", "createTimeISO", "createdAt", "date", "time", "publishedAt", "posted_date"]
+        "created_at": ["timestamp", "takenAt", "createTimeISO", "createdAt", "date", "time", "publishedAt", "posted_date"],
+        "id": ["id", "postId", "post_id", "feedbackId"],
+        "url": ["url", "postUrl", "link", "permalink", "href", "topLevelUrl"]
     }
 
     for target, candidates in col_map.items():
@@ -1002,20 +1043,27 @@ def normalize_common_optimized(rows: List[Dict], platform: str) -> pd.DataFrame:
             df["created_at_display"] = pd.NaT
 
     if "username" not in df.columns:
-        for c in ["ownerUsername", "authorUsername", "username", "author", "pageName", "profileName"]:
+        for c in ["ownerUsername", "authorUsername", "username", "author", "user", "pageName", "profileName"]:
             if c in df.columns:
                 df["username"] = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
                 break
         if "username" not in df.columns:
             df["username"] = "unknown"
 
-    if "url" not in df.columns:
-        for c in ["postUrl", "link", "permalink", "href"]:
+    mask_missing_username = df["username"].isna() | (df["username"].astype(str).str.strip() == "")
+    if mask_missing_username.any():
+        for c in ["pageName", "profileName", "ownerUsername", "authorUsername"]:
             if c in df.columns:
-                df["url"] = df[c]
-                break
-        if "url" not in df.columns:
-            df["url"] = None
+                fallback = df[c].apply(lambda x: x.get('name') if isinstance(x, dict) else x)
+                df.loc[mask_missing_username, "username"] = fallback[mask_missing_username]
+                mask_missing_username = df["username"].isna() | (df["username"].astype(str).str.strip() == "")
+                if not mask_missing_username.any():
+                    break
+
+    if "url" in df.columns:
+        df["url"] = df["url"].apply(canonicalize_post_url)
+    else:
+        df["url"] = None
 
     if "text" in df.columns:
         df["text"] = df["text"].fillna("").astype(str)
@@ -1127,13 +1175,13 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
         normalized = []
         for i in items:
             normalized.append({
-                "id": i.get("postId") or i.get("id"),
+                "id": i.get("postId") or i.get("post_id") or i.get("id") or i.get("feedbackId"),
                 "text": i.get("text") or i.get("content") or i.get("postText") or i.get("message"),
                 "username": (i.get("author") or {}).get("name") or (i.get("user") or {}).get("name") or i.get("pageName"),
-                "likes": i.get("likes") or i.get("reactionCount") or i.get("reactions") or 0,
-                "comments": i.get("comments") or i.get("commentCount") or 0,
-                "shares": i.get("shares") or i.get("shareCount") or 0,
-                "url": i.get("url") or i.get("postUrl") or i.get("permalink"),
+                "likes": i.get("likes") or i.get("reactionCount") or i.get("reactions_count") or i.get("reactions") or 0,
+                "comments": i.get("comments") or i.get("commentCount") or i.get("comments_count") or 0,
+                "shares": i.get("shares") or i.get("shareCount") or i.get("reshare_count") or 0,
+                "url": i.get("url") or i.get("postUrl") or i.get("permalink") or i.get("topLevelUrl"),
                 "created_at": i.get("time") or i.get("timestamp") or i.get("publishedAt"),
             })
         normalized = dedup_normalized_posts(normalized)
@@ -1161,13 +1209,14 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
     normalized = []
     for i in items:
         normalized.append({
-            "id": i.get("postId") or i.get("id"),
+            "id": i.get("postId") or i.get("post_id") or i.get("id") or i.get("feedbackId"),
             "text": i.get("text") or i.get("postText") or i.get("message"),
-            "username": (i.get("user") or {}).get("name") or i.get("pageName"),
-            "likes": i.get("likes", 0),
-            "comments": i.get("comments", 0),
-            "shares": i.get("shares", 0),
-            "url": i.get("url") or i.get("postUrl"),
+            "username": (i.get("user") or {}).get("name") or (i.get("author") or {}).get("name") or i.get("pageName"),
+            "likes": i.get("likes") or i.get("reactions_count") or i.get("reactionLikeCount") or 0,
+            "comments": i.get("comments") or i.get("comments_count") or 0,
+            "shares": i.get("shares") or i.get("reshare_count") or 0,
+            "views": i.get("views") or i.get("viewsCount") or 0,
+            "url": i.get("url") or i.get("postUrl") or i.get("topLevelUrl"),
             "created_at": i.get("time") or i.get("timestamp")
         })
     normalized = dedup_normalized_posts(normalized)
@@ -1234,6 +1283,12 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 unique.append(it)
             items = unique[: int(limit)]
 
+        if _ig_is_demo_only_payload(items):
+            raise RuntimeError(
+                "Apify devolvio datos de demo para Instagram hashtags/keywords. "
+                "Revisa el token o el acceso al actor."
+            )
+
         return normalize_common_optimized(items, "instagram")
 
     if mode == "hashtag":
@@ -1258,6 +1313,11 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
             payload,
             timeout_secs=apify_timeout_for_limit(int(limit))
         )
+        if _ig_is_demo_only_payload(items):
+            raise RuntimeError(
+                "Apify devolvio datos de demo para Instagram hashtags. "
+                "Revisa el token o el acceso al actor."
+            )
         return normalize_common_optimized(items, "instagram")
 
     # mode == "user"
