@@ -44,8 +44,10 @@ API_URL_X = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 
 # Apify actors (mejor elecciÃ³n por modo)
 APIFY_ACTOR_IG_HASHTAG = "apidojo/instagram-hashtag-scraper"          # keyword + hashtag -> posts/captions (ideal para temÃ¡tica)
+APIFY_ACTOR_IG_HASHTAG_ALT = "apify/instagram-hashtag-scraper"        # fallback robusto para hashtag/keyword exacto
 APIFY_ACTOR_IG_POSTS   = "apify/instagram-post-scraper"              # por usuario -> posts
 APIFY_ACTOR_FB_SEARCH  = "scraper_one/facebook-posts-search"         # bÃºsqueda por keywords/hashtag (temÃ¡tica)
+APIFY_ACTOR_FB_SEARCH_ALT = "danek/facebook-search-ppr"              # fallback confiable para busqueda tematica
 APIFY_ACTOR_FB_PAGES   = "apify/facebook-posts-scraper"              # por usuario/url (pages/groups)
 
 # Polling / sync improvements
@@ -811,6 +813,23 @@ def _ig_is_demo_only_payload(items: List[Dict[str, Any]]) -> bool:
 
     return not any(_ig_has_post_payload(it) for it in demo_items)
 
+def _fetch_instagram_alt_hashtags(tokens: List[str], tags: List[str], limit: int) -> List[Dict[str, Any]]:
+    """Fallback con actor alternativo de hashtags de Instagram."""
+    clean_tags = [str(t).strip().replace("#", "") for t in tags if str(t).strip()]
+    if not clean_tags:
+        return []
+    payload = {
+        "hashtags": clean_tags,
+        "resultsType": "posts",
+        "resultsLimit": int(limit)
+    }
+    return run_apify_actor_v2(
+        APIFY_ACTOR_IG_HASHTAG_ALT,
+        tokens,
+        payload,
+        timeout_secs=apify_timeout_for_limit(int(limit))
+    )
+
 @measure_time("apify_dataset_items_paginated")
 def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int = 5000) -> List[Dict]:
     """Descarga items con paginaciÃ³n limit/offset (robusto)."""
@@ -1170,6 +1189,15 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
 
         timeout_secs = apify_timeout_for_limit(effective_limit)
         items = run_apify_actor_v2(APIFY_ACTOR_FB_SEARCH, tokens, payload, timeout_secs=timeout_secs)
+        if not items:
+            log_message("Facebook SEARCH sin resultados con actor primario, probando fallback danek/facebook-search-ppr", "warning")
+            alt_payload = {
+                "query": query,
+                "search_type": "posts",
+                "max_posts": effective_limit,
+                "recent_posts": fb_search_type == "latest"
+            }
+            items = run_apify_actor_v2(APIFY_ACTOR_FB_SEARCH_ALT, tokens, alt_payload, timeout_secs=timeout_secs)
 
         # Normalizamos campos tÃ­picos que vienen de distintos actores
         normalized = []
@@ -1255,7 +1283,7 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 break
 
         if not items and keywords:
-            # Fallback con startUrls por hashtag para mejorar recall
+            # Fallback con el mismo actor por startUrls
             start_urls = [f"https://www.instagram.com/explore/tags/{kw}/" for kw in keywords]
             payload = {
                 "startUrls": start_urls,
@@ -1269,6 +1297,10 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 payload,
                 timeout_secs=apify_timeout_for_limit(int(limit))
             )
+
+        if (not items or _ig_is_demo_only_payload(items)) and keywords:
+            log_message("Instagram KEYWORD sin datos utiles con actor primario, probando fallback apify/instagram-hashtag-scraper", "warning")
+            items = _fetch_instagram_alt_hashtags(tokens, keywords, limit)
 
         if items:
             # Dedup por id/url para evitar repetidos al combinar keywords
@@ -1293,26 +1325,23 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
 
     if mode == "hashtag":
         log_message(f"Fetching Instagram HASHTAG: {query}", "info")
-        # Este actor espera startUrls como lista de strings
-        start_urls = []
-        for h in query.split(","):
-            ensure_search_not_cancelled()
-            h = h.strip().replace("#", "")
-            if not h:
-                continue
-            start_urls.append(f"https://www.instagram.com/explore/tags/{h}/")
-        payload = {
-            "startUrls": start_urls,
-            "getPosts": True,
-            "getReels": True,
-            "maxItems": int(limit)
-        }
-        items = run_apify_actor_v2(
-            APIFY_ACTOR_IG_HASHTAG,
-            tokens,
-            payload,
-            timeout_secs=apify_timeout_for_limit(int(limit))
-        )
+        tags = [h.strip().replace("#", "") for h in query.split(",") if h.strip()]
+        items = _fetch_instagram_alt_hashtags(tokens, tags, limit)
+        if not items:
+            log_message("Instagram HASHTAG sin resultados con actor alternativo, probando actor primario por startUrls", "warning")
+            start_urls = [f"https://www.instagram.com/explore/tags/{h}/" for h in tags]
+            payload = {
+                "startUrls": start_urls,
+                "getPosts": True,
+                "getReels": True,
+                "maxItems": int(limit)
+            }
+            items = run_apify_actor_v2(
+                APIFY_ACTOR_IG_HASHTAG,
+                tokens,
+                payload,
+                timeout_secs=apify_timeout_for_limit(int(limit))
+            )
         if _ig_is_demo_only_payload(items):
             raise RuntimeError(
                 "Apify devolvio datos de demo para Instagram hashtags. "
