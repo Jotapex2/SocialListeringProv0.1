@@ -830,6 +830,10 @@ def _fetch_instagram_alt_hashtags(tokens: List[str], tags: List[str], limit: int
         timeout_secs=apify_timeout_for_limit(int(limit))
     )
 
+def _parse_tag_terms(raw: str) -> List[str]:
+    """Parsea hashtags/keywords permitiendo coma, espacio, punto y coma o salto de linea."""
+    return [part.strip().replace("#", "") for part in re.split(r"[\s,;\n]+", raw or "") if part.strip()]
+
 @measure_time("apify_dataset_items_paginated")
 def apify_dataset_items_paginated(dataset_id: str, token: str, limit_total: int = 5000) -> List[Dict]:
     """Descarga items con paginaciÃ³n limit/offset (robusto)."""
@@ -1798,7 +1802,20 @@ if run_btn:
                 st.stop()
             search_mode_norm = unidecode((search_mode or "").lower())
             mode = "hashtag" if "hashtag" in search_mode_norm else "keyword" if "busqueda" in search_mode_norm else "user"
-            q = hashtags_str if mode == "hashtag" else (username_input if mode == "user" else topic)
+            if mode == "hashtag":
+                parsed_tags = _parse_tag_terms(hashtags_str)
+                if not parsed_tags and topic:
+                    parsed_tags = _parse_tag_terms(topic)
+                q = ",".join(parsed_tags)
+            elif mode == "user":
+                q = username_input
+            else:
+                q = topic or hashtags_str
+
+            if not str(q or "").strip():
+                raise RuntimeError("La consulta de Instagram esta vacia. Ingresa al menos un hashtag, keyword o usuario segun el modo.")
+
+            log_message(f"Instagram modo={mode} query_resuelta='{q}'", "info")
             df = fetch_instagram_cached(tokens, q, limit, mode)
 
         elif platform == "TikTok":
