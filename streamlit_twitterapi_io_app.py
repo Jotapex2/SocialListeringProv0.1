@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 SCL_TZ = pytz.timezone("America/Santiago")
 API_URL_X = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+SCRAPECREATORS_BASE_URL = "https://api.scrapecreators.com"
+BRIGHTDATA_BASE_URL = "https://api.brightdata.com"
 
 # Apify actors (mejor elecciÃ³n por modo)
 APIFY_ACTOR_IG_HASHTAG = "apidojo/instagram-hashtag-scraper"          # keyword + hashtag -> posts/captions (ideal para temÃ¡tica)
@@ -55,6 +57,12 @@ ASYNC_POLL_INTERVAL = 3
 APIFY_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 APIFY_RETRY_MAX_ATTEMPTS = 4
 APIFY_RETRY_BASE_DELAY = 1.5
+SCRAPECREATORS_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+SCRAPECREATORS_RETRY_MAX_ATTEMPTS = 4
+SCRAPECREATORS_RETRY_BASE_DELAY = 1.5
+BRIGHTDATA_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+BRIGHTDATA_RETRY_MAX_ATTEMPTS = 4
+BRIGHTDATA_RETRY_BASE_DELAY = 1.5
 
 load_dotenv()
 
@@ -640,7 +648,21 @@ def apify_headers(token: str) -> Dict[str, str]:
     # MÃ¡s seguro que ?token= en URL (evita leaks en logs/historial)
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+def scrapecreators_headers(api_key: str) -> Dict[str, str]:
+    return {"x-api-key": api_key, "Accept": "application/json"}
+
+def brightdata_headers(token: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
+
 def apify_timeout_for_limit(limit_hint: int, base_secs: int = 180, per_100_items: int = 20, max_secs: int = 900) -> int:
+    safe_limit = max(1, int(limit_hint or 1))
+    return min(max_secs, base_secs + ((safe_limit - 1) // 100) * per_100_items)
+
+def scrapecreators_timeout_for_limit(limit_hint: int, base_secs: int = 45, per_100_items: int = 10, max_secs: int = 180) -> int:
+    safe_limit = max(1, int(limit_hint or 1))
+    return min(max_secs, base_secs + ((safe_limit - 1) // 100) * per_100_items)
+
+def brightdata_timeout_for_limit(limit_hint: int, base_secs: int = 60, per_100_items: int = 15, max_secs: int = 240) -> int:
     safe_limit = max(1, int(limit_hint or 1))
     return min(max_secs, base_secs + ((safe_limit - 1) // 100) * per_100_items)
 
@@ -696,6 +718,96 @@ def apify_request_with_retry(
             backoff = APIFY_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.75)
             log_message(
                 f"{op_name}: excepcion {exc}, reintento {attempt}/{APIFY_RETRY_MAX_ATTEMPTS} en {backoff:.2f}s",
+                "warning"
+            )
+            sleep_with_cancel(backoff)
+    return last_response
+
+def scrapecreators_request_with_retry(
+    path: str,
+    api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: int = 45,
+    op_name: str = "scrapecreators_request"
+) -> Optional[requests.Response]:
+    last_response: Optional[requests.Response] = None
+    url = f"{SCRAPECREATORS_BASE_URL}{path}"
+    for attempt in range(1, SCRAPECREATORS_RETRY_MAX_ATTEMPTS + 1):
+        ensure_search_not_cancelled()
+        try:
+            response = requests.get(
+                url=url,
+                headers=scrapecreators_headers(api_key),
+                params=params,
+                timeout=timeout
+            )
+            last_response = response
+            if response.status_code not in SCRAPECREATORS_RETRYABLE_STATUS:
+                return response
+
+            if attempt == SCRAPECREATORS_RETRY_MAX_ATTEMPTS:
+                break
+
+            retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+            backoff = SCRAPECREATORS_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            wait_time = retry_after if retry_after is not None else (backoff + random.uniform(0, 0.75))
+            log_message(
+                f"{op_name}: status {response.status_code}, reintento {attempt}/{SCRAPECREATORS_RETRY_MAX_ATTEMPTS} en {wait_time:.2f}s",
+                "warning"
+            )
+            sleep_with_cancel(wait_time)
+        except requests.RequestException as exc:
+            if attempt == SCRAPECREATORS_RETRY_MAX_ATTEMPTS:
+                log_message(f"{op_name}: excepcion final {exc}", "error")
+                break
+            backoff = SCRAPECREATORS_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.75)
+            log_message(
+                f"{op_name}: excepcion {exc}, reintento {attempt}/{SCRAPECREATORS_RETRY_MAX_ATTEMPTS} en {backoff:.2f}s",
+                "warning"
+            )
+            sleep_with_cancel(backoff)
+    return last_response
+
+def brightdata_request_with_retry(
+    path: str,
+    token: str,
+    json_payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 60,
+    op_name: str = "brightdata_request"
+) -> Optional[requests.Response]:
+    last_response: Optional[requests.Response] = None
+    url = f"{BRIGHTDATA_BASE_URL}{path}"
+    for attempt in range(1, BRIGHTDATA_RETRY_MAX_ATTEMPTS + 1):
+        ensure_search_not_cancelled()
+        try:
+            response = requests.post(
+                url=url,
+                headers=brightdata_headers(token),
+                json=json_payload or {},
+                timeout=timeout
+            )
+            last_response = response
+            if response.status_code not in BRIGHTDATA_RETRYABLE_STATUS:
+                return response
+
+            if attempt == BRIGHTDATA_RETRY_MAX_ATTEMPTS:
+                break
+
+            retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
+            backoff = BRIGHTDATA_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            wait_time = retry_after if retry_after is not None else (backoff + random.uniform(0, 0.75))
+            log_message(
+                f"{op_name}: status {response.status_code}, reintento {attempt}/{BRIGHTDATA_RETRY_MAX_ATTEMPTS} en {wait_time:.2f}s",
+                "warning"
+            )
+            sleep_with_cancel(wait_time)
+        except requests.RequestException as exc:
+            if attempt == BRIGHTDATA_RETRY_MAX_ATTEMPTS:
+                log_message(f"{op_name}: excepcion final {exc}", "error")
+                break
+            backoff = BRIGHTDATA_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 0.75)
+            log_message(
+                f"{op_name}: excepcion {exc}, reintento {attempt}/{BRIGHTDATA_RETRY_MAX_ATTEMPTS} en {backoff:.2f}s",
                 "warning"
             )
             sleep_with_cancel(backoff)
@@ -773,6 +885,381 @@ def dedup_posts_df(df: pd.DataFrame) -> pd.DataFrame:
     if "url" in out.columns:
         out["url"] = out["url"].apply(canonicalize_post_url)
     return out
+
+def _extract_scrapecreators_data(payload: Any) -> Any:
+    if isinstance(payload, dict) and "data" in payload:
+        return payload.get("data")
+    return payload
+
+def _scrapecreators_collect_candidate_items(payload: Any) -> List[Dict[str, Any]]:
+    extracted = _extract_scrapecreators_data(payload)
+    candidates: List[Dict[str, Any]] = []
+
+    def append_items(value: Any):
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    candidates.append(item)
+
+    if isinstance(extracted, list):
+        append_items(extracted)
+    elif isinstance(extracted, dict):
+        append_items(extracted.get("items"))
+        append_items(extracted.get("posts"))
+        append_items(extracted.get("reels"))
+        user = extracted.get("user")
+        if isinstance(user, dict):
+            timeline = ((user.get("edge_owner_to_timeline_media") or {}).get("edges")) or []
+            for edge in timeline:
+                node = edge.get("node") if isinstance(edge, dict) else None
+                if isinstance(node, dict):
+                    candidates.append(node)
+            feed_timeline = ((user.get("edge_felix_video_timeline") or {}).get("edges")) or []
+            for edge in feed_timeline:
+                node = edge.get("node") if isinstance(edge, dict) else None
+                if isinstance(node, dict):
+                    candidates.append(node)
+
+    return candidates
+
+def _normalize_scrapecreators_instagram_items(items: List[Dict[str, Any]], fallback_username: Optional[str] = None) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        caption_edges = (((item.get("edge_media_to_caption") or {}).get("edges")) or [])
+        caption = ""
+        if caption_edges and isinstance(caption_edges[0], dict):
+            caption = ((caption_edges[0].get("node") or {}).get("text")) or ""
+
+        comments_count = (
+            ((item.get("edge_media_to_comment") or {}).get("count"))
+            or item.get("comment_count")
+            or item.get("comments")
+            or 0
+        )
+        likes_count = (
+            ((item.get("edge_liked_by") or {}).get("count"))
+            or ((item.get("edge_media_preview_like") or {}).get("count"))
+            or item.get("like_count")
+            or item.get("likes")
+            or 0
+        )
+        owner = item.get("owner") or {}
+        username = (
+            item.get("username")
+            or owner.get("username")
+            or item.get("ownerUsername")
+            or fallback_username
+            or "unknown"
+        )
+        code = item.get("shortcode") or item.get("shortCode") or item.get("code")
+        typename = str(item.get("__typename") or "").lower()
+        url = item.get("url") or item.get("link")
+        if not url and code:
+            if "video" in typename or item.get("is_video"):
+                url = f"https://www.instagram.com/reel/{code}/"
+            else:
+                url = f"https://www.instagram.com/p/{code}/"
+
+        normalized.append({
+            "id": item.get("id") or code,
+            "text": item.get("caption") or item.get("text") or item.get("title") or caption,
+            "username": username,
+            "likes": likes_count,
+            "comments": comments_count,
+            "shares": item.get("share_count") or 0,
+            "views": item.get("video_view_count") or item.get("play_count") or item.get("view_count") or 0,
+            "url": url,
+            "created_at": item.get("taken_at_timestamp") or item.get("timestamp") or item.get("takenAt"),
+            "shortcode": code
+        })
+
+    return normalized
+
+def _fetch_scrapecreators_instagram_profile(api_key: str, handle: str) -> Dict[str, Any]:
+    response = scrapecreators_request_with_retry(
+        path="/v1/instagram/profile",
+        api_key=api_key,
+        params={"handle": handle, "trim": "false"},
+        timeout=scrapecreators_timeout_for_limit(20),
+        op_name=f"scrapecreators_instagram_profile:{handle}"
+    )
+    if response is None or response.status_code != 200:
+        status = response.status_code if response is not None else "no_response"
+        body = response.text[:300] if response is not None else ""
+        log_message(f"ScrapeCreators profile fallo para @{handle}: {status}", "warning", {"text": body})
+        return {}
+
+    try:
+        payload = response.json()
+    except Exception:
+        log_message(f"ScrapeCreators profile JSON invalido para @{handle}", "warning")
+        return {}
+
+    data = _extract_scrapecreators_data(payload)
+    return data if isinstance(data, dict) else {}
+
+def _fetch_scrapecreators_instagram_user_posts(api_key: str, query: str, limit: int) -> List[Dict[str, Any]]:
+    handles = [u.strip().lstrip("@") for u in query.split(",") if u.strip()]
+    if not handles:
+        return []
+
+    all_items: List[Dict[str, Any]] = []
+    per_handle_limit = max(1, int(limit))
+    for handle in handles:
+        ensure_search_not_cancelled()
+        profile_data = _fetch_scrapecreators_instagram_profile(api_key, handle)
+        items = _scrapecreators_collect_candidate_items(profile_data)
+        if items:
+            all_items.extend(_normalize_scrapecreators_instagram_items(items, fallback_username=handle))
+        if len(all_items) >= per_handle_limit:
+            break
+
+    return dedup_normalized_posts(all_items)[: int(limit)]
+
+def _fetch_scrapecreators_instagram_search(api_key: str, terms: List[str], limit: int) -> List[Dict[str, Any]]:
+    clean_terms = [str(term).strip().replace("#", "") for term in terms if str(term).strip()]
+    if not clean_terms:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for term in clean_terms:
+        ensure_search_not_cancelled()
+        params_variants = [
+            {"query": term, "limit": min(int(limit), 50)},
+            {"query": term, "num_results": min(int(limit), 50)},
+            {"keyword": term, "limit": min(int(limit), 50)},
+        ]
+
+        for params in params_variants:
+            response = scrapecreators_request_with_retry(
+                path="/v1/instagram/reels/search",
+                api_key=api_key,
+                params=params,
+                timeout=scrapecreators_timeout_for_limit(limit),
+                op_name=f"scrapecreators_instagram_search:{term}"
+            )
+            if response is None:
+                continue
+            if response.status_code == 400:
+                continue
+            if response.status_code != 200:
+                body = response.text[:250]
+                log_message(f"ScrapeCreators search fallo para '{term}': {response.status_code}", "warning", {"text": body})
+                break
+
+            try:
+                payload = response.json()
+            except Exception:
+                log_message(f"ScrapeCreators search JSON invalido para '{term}'", "warning")
+                break
+
+            items = _scrapecreators_collect_candidate_items(payload)
+            if items:
+                results.extend(_normalize_scrapecreators_instagram_items(items))
+            break
+
+        if len(results) >= int(limit):
+            break
+
+    return dedup_normalized_posts(results)[: int(limit)]
+
+def _normalize_scrapecreators_facebook_items(items: List[Dict[str, Any]], fallback_username: Optional[str] = None) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        author = item.get("author") or item.get("user") or {}
+        username = (
+            item.get("username")
+            or item.get("pageName")
+            or author.get("name")
+            or fallback_username
+            or "unknown"
+        )
+        normalized.append({
+            "id": item.get("postId") or item.get("id") or item.get("feedbackId"),
+            "text": item.get("text") or item.get("message") or item.get("caption") or item.get("content"),
+            "username": username,
+            "likes": item.get("reactionCount") or item.get("reactions_count") or item.get("likes") or 0,
+            "comments": item.get("commentCount") or item.get("comments_count") or item.get("comments") or 0,
+            "shares": item.get("shareCount") or item.get("shares") or 0,
+            "views": item.get("viewCount") or item.get("views") or 0,
+            "url": item.get("url") or item.get("postUrl") or item.get("permalink"),
+            "created_at": item.get("timestamp") or item.get("time") or item.get("publishedAt")
+        })
+    return normalized
+
+def _fetch_scrapecreators_facebook_user_posts(api_key: str, query: str, limit: int) -> List[Dict[str, Any]]:
+    identifiers = [part.strip() for part in query.split(",") if part.strip()]
+    if not identifiers:
+        return []
+
+    all_items: List[Dict[str, Any]] = []
+    for identifier in identifiers:
+        ensure_search_not_cancelled()
+        params: Dict[str, Any]
+        fallback_username = identifier
+        if "facebook.com" in identifier.lower():
+            params = {"url": identifier}
+        else:
+            params = {"handle": identifier}
+
+        response = scrapecreators_request_with_retry(
+            path="/v1/facebook/profile/posts",
+            api_key=api_key,
+            params=params,
+            timeout=scrapecreators_timeout_for_limit(limit),
+            op_name=f"scrapecreators_facebook_profile_posts:{identifier}"
+        )
+        if response is None or response.status_code != 200:
+            status = response.status_code if response is not None else "no_response"
+            body = response.text[:250] if response is not None else ""
+            log_message(f"ScrapeCreators Facebook posts fallo para '{identifier}': {status}", "warning", {"text": body})
+            continue
+
+        try:
+            payload = response.json()
+        except Exception:
+            log_message(f"ScrapeCreators Facebook posts JSON invalido para '{identifier}'", "warning")
+            continue
+
+        items = _scrapecreators_collect_candidate_items(payload)
+        if items:
+            all_items.extend(_normalize_scrapecreators_facebook_items(items, fallback_username=fallback_username))
+        if len(all_items) >= int(limit):
+            break
+
+    return dedup_normalized_posts(all_items)[: int(limit)]
+
+def _extract_brightdata_items(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "results", "items", "posts"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return [payload]
+    return []
+
+def _normalize_brightdata_instagram_items(items: List[Dict[str, Any]], fallback_username: Optional[str] = None) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        username = (
+            item.get("username")
+            or item.get("user_name")
+            or item.get("ownerUsername")
+            or item.get("owner_username")
+            or fallback_username
+            or "unknown"
+        )
+        normalized.append({
+            "id": item.get("id") or item.get("post_id") or item.get("shortcode"),
+            "text": item.get("caption") or item.get("post_text") or item.get("text") or item.get("description"),
+            "username": username,
+            "likes": item.get("like_count") or item.get("likes") or item.get("num_likes") or 0,
+            "comments": item.get("comment_count") or item.get("comments") or item.get("num_comments") or 0,
+            "shares": item.get("share_count") or 0,
+            "views": item.get("view_count") or item.get("video_view_count") or item.get("num_views") or 0,
+            "url": item.get("url") or item.get("post_url"),
+            "created_at": item.get("timestamp") or item.get("date_posted") or item.get("created_at")
+        })
+    return normalized
+
+def _normalize_brightdata_facebook_items(items: List[Dict[str, Any]], fallback_username: Optional[str] = None) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        username = (
+            item.get("username")
+            or item.get("page_name")
+            or item.get("user_name")
+            or fallback_username
+            or "unknown"
+        )
+        normalized.append({
+            "id": item.get("id") or item.get("post_id"),
+            "text": item.get("post_text") or item.get("text") or item.get("message") or item.get("caption"),
+            "username": username,
+            "likes": item.get("num_likes") or item.get("reaction_count") or item.get("likes") or 0,
+            "comments": item.get("num_comments") or item.get("comment_count") or item.get("comments") or 0,
+            "shares": item.get("num_shares") or item.get("share_count") or item.get("shares") or 0,
+            "views": item.get("num_views") or item.get("view_count") or item.get("views") or 0,
+            "url": item.get("url") or item.get("post_url"),
+            "created_at": item.get("timestamp") or item.get("date_posted") or item.get("created_at")
+        })
+    return normalized
+
+def _fetch_brightdata_posts(token: str, path: str, urls: List[str], limit: int, platform: str) -> List[Dict[str, Any]]:
+    all_items: List[Dict[str, Any]] = []
+    for url in urls:
+        ensure_search_not_cancelled()
+        payload = {"url": url}
+        if limit:
+            payload["num_of_posts"] = int(limit)
+            payload["limit"] = int(limit)
+        response = brightdata_request_with_retry(
+            path=path,
+            token=token,
+            json_payload=payload,
+            timeout=brightdata_timeout_for_limit(limit),
+            op_name=f"brightdata_{platform}_posts:{url}"
+        )
+        if response is None or response.status_code not in (200, 201):
+            status = response.status_code if response is not None else "no_response"
+            body = response.text[:250] if response is not None else ""
+            log_message(f"Bright Data fallo para {platform} url '{url}': {status}", "warning", {"text": body})
+            continue
+        try:
+            payload_json = response.json()
+        except Exception:
+            log_message(f"Bright Data devolvio JSON invalido para {platform} url '{url}'", "warning")
+            continue
+        items = _extract_brightdata_items(payload_json)
+        if platform == "instagram":
+            all_items.extend(_normalize_brightdata_instagram_items(items))
+        else:
+            all_items.extend(_normalize_brightdata_facebook_items(items))
+        if len(all_items) >= int(limit):
+            break
+    return dedup_normalized_posts(all_items)[: int(limit)]
+
+def _fetch_brightdata_instagram(query: str, limit: int, mode: str, token: str) -> List[Dict[str, Any]]:
+    terms = [part.strip().lstrip("@").replace("#", "") for part in query.split(",") if part.strip()]
+    if not terms:
+        return []
+
+    urls: List[str] = []
+    if mode == "user":
+        urls = [f"https://www.instagram.com/{term}/" for term in terms]
+    elif mode == "hashtag":
+        urls = [f"https://www.instagram.com/explore/tags/{term}/" for term in terms]
+    else:
+        log_message("Bright Data no tiene mapeo estable para Instagram keyword search en esta app; se hara fallback a otro proveedor", "warning")
+        return []
+
+    return _fetch_brightdata_posts(token, "/instagram/posts/collect", urls, limit, "instagram")
+
+def _fetch_brightdata_facebook(query: str, limit: int, token: str) -> List[Dict[str, Any]]:
+    terms = [part.strip() for part in query.split(",") if part.strip()]
+    if not terms:
+        return []
+
+    urls: List[str] = []
+    for term in terms:
+        if "facebook.com" in term.lower():
+            urls.append(term)
+        else:
+            urls.append(f"https://www.facebook.com/{term}")
+
+    return _fetch_brightdata_posts(token, "/facebook/posts/collect", urls, limit, "facebook")
 
 def _ig_has_post_payload(item: Dict[str, Any]) -> bool:
     """Detecta si un item de Instagram contiene datos reales de post."""
@@ -1169,7 +1656,17 @@ def fetch_x_cached(api_key: str, query: str, limit: int) -> pd.DataFrame:
     return normalize_common_optimized(deduped_rows, "x")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, location: Optional[str] = None, fb_search_type: str = "latest") -> pd.DataFrame:
+def fetch_facebook_cached(
+    tokens: List[str],
+    scrapecreators_api_key: Optional[str],
+    brightdata_token: Optional[str],
+    query: str,
+    limit: int,
+    mode: str,
+    location: Optional[str] = None,
+    fb_search_type: str = "latest",
+    provider: str = "auto"
+) -> pd.DataFrame:
     """
     Facebook:
     - mode == "search" => usa scraper_one/facebook-posts-search (query/resultsCount/searchType/location) para temÃ¡tica.
@@ -1192,6 +1689,8 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
             payload["location"] = location
 
         timeout_secs = apify_timeout_for_limit(effective_limit)
+        if provider in ("scrapecreators", "brightdata"):
+            log_message(f"Facebook por tematica no esta soportado en {provider}; usando Apify", "warning")
         items = run_apify_actor_v2(APIFY_ACTOR_FB_SEARCH, tokens, payload, timeout_secs=timeout_secs)
         if not items:
             log_message("Facebook SEARCH sin resultados con actor primario, probando fallback danek/facebook-search-ppr", "warning")
@@ -1221,22 +1720,40 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
 
     # mode == "user"
     log_message(f"Fetching Facebook USER/URL: {query}", "info")
-    payload = {"resultsLimit": int(limit), "maxPosts": int(limit)}
-    actor = APIFY_ACTOR_FB_PAGES
+    provider_norm = str(provider or "auto").strip().lower()
+    items: List[Dict[str, Any]] = []
 
-    urls = []
-    for u in query.split(","):
-        u = u.strip()
-        if not u:
-            continue
-        if "facebook.com" in u:
-            urls.append({"url": u})
+    if provider_norm == "brightdata" and brightdata_token:
+        items = _fetch_brightdata_facebook(query, limit, brightdata_token)
+        if items:
+            log_message(f"Facebook USER resuelto con Bright Data: {len(items)} posts", "info")
         else:
-            urls.append({"url": f"https://www.facebook.com/{u}"})
-    payload["startUrls"] = urls
+            log_message("Facebook USER sin resultados con Bright Data", "warning")
 
-    timeout_secs = apify_timeout_for_limit(int(limit))
-    items = run_apify_actor_v2(actor, tokens, payload, timeout_secs=timeout_secs)
+    if not items and provider_norm in ("scrapecreators", "auto") and scrapecreators_api_key:
+        items = _fetch_scrapecreators_facebook_user_posts(scrapecreators_api_key, query, limit)
+        if items:
+            log_message(f"Facebook USER resuelto con ScrapeCreators: {len(items)} posts", "info")
+        elif provider_norm == "scrapecreators":
+            log_message("Facebook USER sin resultados con ScrapeCreators", "warning")
+
+    if not items and provider_norm in ("apify", "auto", "brightdata"):
+        payload = {"resultsLimit": int(limit), "maxPosts": int(limit)}
+        actor = APIFY_ACTOR_FB_PAGES
+
+        urls = []
+        for u in query.split(","):
+            u = u.strip()
+            if not u:
+                continue
+            if "facebook.com" in u:
+                urls.append({"url": u})
+            else:
+                urls.append({"url": f"https://www.facebook.com/{u}"})
+        payload["startUrls"] = urls
+
+        timeout_secs = apify_timeout_for_limit(int(limit))
+        items = run_apify_actor_v2(actor, tokens, payload, timeout_secs=timeout_secs)
 
     normalized = []
     for i in items:
@@ -1255,38 +1772,63 @@ def fetch_facebook_cached(tokens: List[str], query: str, limit: int, mode: str, 
     return normalize_common_optimized(normalized, "facebook")
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str) -> pd.DataFrame:
+def fetch_instagram_cached(
+    tokens: List[str],
+    scrapecreators_api_key: Optional[str],
+    brightdata_token: Optional[str],
+    query: str,
+    limit: int,
+    mode: str,
+    provider: str = "auto"
+) -> pd.DataFrame:
     """
     Instagram:
     - mode == "hashtag" => apidojo/instagram-hashtag-scraper con startUrls o keyword
     - mode == "keyword" => apidojo/instagram-hashtag-scraper con keyword (tema/palabra) => posts/captions
     - mode == "user"    => apify/instagram-post-scraper por usernames (posts)
     """
+    provider_norm = str(provider or "auto").strip().lower()
+
     if mode == "keyword":
         log_message(f"Fetching Instagram KEYWORD: {query}", "info")
         keywords = [k.strip().replace("#", "") for k in re.split(r"[,;\n]+", query or "") if k.strip()]
         items: List[Dict] = []
 
-        for kw in keywords:
-            ensure_search_not_cancelled()
-            payload = {
-                "keyword": kw,
-                "getPosts": True,
-                "getReels": True,
-                "maxItems": int(limit)
-            }
-            batch = run_apify_actor_v2(
-                APIFY_ACTOR_IG_HASHTAG,
-                tokens,
-                payload,
-                timeout_secs=apify_timeout_for_limit(int(limit))
-            )
-            if batch:
-                items.extend(batch)
-            if len(items) >= int(limit):
-                break
+        if provider_norm == "brightdata" and brightdata_token:
+            items = _fetch_brightdata_instagram(query, limit, mode, brightdata_token)
+            if items:
+                log_message(f"Instagram KEYWORD resuelto con Bright Data: {len(items)} posts", "info")
+            else:
+                log_message("Instagram KEYWORD sin resultados con Bright Data", "warning")
 
-        if not items and keywords:
+        if provider_norm in ("scrapecreators", "auto") and scrapecreators_api_key:
+            items = _fetch_scrapecreators_instagram_search(scrapecreators_api_key, keywords, limit)
+            if items:
+                log_message(f"Instagram KEYWORD resuelto con ScrapeCreators: {len(items)} posts", "info")
+            elif provider_norm == "scrapecreators":
+                log_message("Instagram KEYWORD sin resultados con ScrapeCreators", "warning")
+
+        if not items and provider_norm in ("apify", "auto", "brightdata"):
+            for kw in keywords:
+                ensure_search_not_cancelled()
+                payload = {
+                    "keyword": kw,
+                    "getPosts": True,
+                    "getReels": True,
+                    "maxItems": int(limit)
+                }
+                batch = run_apify_actor_v2(
+                    APIFY_ACTOR_IG_HASHTAG,
+                    tokens,
+                    payload,
+                    timeout_secs=apify_timeout_for_limit(int(limit))
+                )
+                if batch:
+                    items.extend(batch)
+                if len(items) >= int(limit):
+                    break
+
+        if not items and keywords and provider_norm in ("apify", "auto", "brightdata"):
             # Fallback con el mismo actor por startUrls
             start_urls = [f"https://www.instagram.com/explore/tags/{kw}/" for kw in keywords]
             payload = {
@@ -1302,7 +1844,7 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
                 timeout_secs=apify_timeout_for_limit(int(limit))
             )
 
-        if (not items or _ig_is_demo_only_payload(items)) and keywords:
+        if (not items or _ig_is_demo_only_payload(items)) and keywords and provider_norm in ("apify", "auto", "brightdata"):
             log_message("Instagram KEYWORD sin datos utiles con actor primario, probando fallback apify/instagram-hashtag-scraper", "warning")
             items = _fetch_instagram_alt_hashtags(tokens, keywords, limit)
 
@@ -1330,8 +1872,24 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
     if mode == "hashtag":
         log_message(f"Fetching Instagram HASHTAG: {query}", "info")
         tags = [h.strip().replace("#", "") for h in query.split(",") if h.strip()]
-        items = _fetch_instagram_alt_hashtags(tokens, tags, limit)
-        if not items:
+        items: List[Dict[str, Any]] = []
+        if provider_norm == "brightdata" and brightdata_token:
+            items = _fetch_brightdata_instagram(query, limit, mode, brightdata_token)
+            if items:
+                log_message(f"Instagram HASHTAG resuelto con Bright Data: {len(items)} posts", "info")
+            else:
+                log_message("Instagram HASHTAG sin resultados con Bright Data", "warning")
+
+        if provider_norm in ("scrapecreators", "auto") and scrapecreators_api_key:
+            items = _fetch_scrapecreators_instagram_search(scrapecreators_api_key, tags, limit)
+            if items:
+                log_message(f"Instagram HASHTAG resuelto con ScrapeCreators: {len(items)} posts", "info")
+            elif provider_norm == "scrapecreators":
+                log_message("Instagram HASHTAG sin resultados con ScrapeCreators", "warning")
+
+        if not items and provider_norm in ("apify", "auto", "brightdata"):
+            items = _fetch_instagram_alt_hashtags(tokens, tags, limit)
+        if not items and provider_norm in ("apify", "auto", "brightdata"):
             log_message("Instagram HASHTAG sin resultados con actor alternativo, probando actor primario por startUrls", "warning")
             start_urls = [f"https://www.instagram.com/explore/tags/{h}/" for h in tags]
             payload = {
@@ -1355,17 +1913,33 @@ def fetch_instagram_cached(tokens: List[str], query: str, limit: int, mode: str)
 
     # mode == "user"
     log_message(f"Fetching Instagram USER: {query}", "info")
-    payload = {
-        "usernames": [u.strip().lstrip("@") for u in query.split(",") if u.strip()],
-        "resultsLimit": int(limit),
-        "resultsType": "posts"
-    }
-    items = run_apify_actor_v2(
-        APIFY_ACTOR_IG_POSTS,
-        tokens,
-        payload,
-        timeout_secs=apify_timeout_for_limit(int(limit))
-    )
+    items: List[Dict[str, Any]] = []
+    if provider_norm == "brightdata" and brightdata_token:
+        items = _fetch_brightdata_instagram(query, limit, mode, brightdata_token)
+        if items:
+            log_message(f"Instagram USER resuelto con Bright Data: {len(items)} posts", "info")
+        else:
+            log_message("Instagram USER sin resultados con Bright Data", "warning")
+
+    if provider_norm in ("scrapecreators", "auto") and scrapecreators_api_key:
+        items = _fetch_scrapecreators_instagram_user_posts(scrapecreators_api_key, query, limit)
+        if items:
+            log_message(f"Instagram USER resuelto con ScrapeCreators: {len(items)} posts", "info")
+        elif provider_norm == "scrapecreators":
+            log_message("Instagram USER sin resultados con ScrapeCreators", "warning")
+
+    if not items and provider_norm in ("apify", "auto", "brightdata"):
+        payload = {
+            "usernames": [u.strip().lstrip("@") for u in query.split(",") if u.strip()],
+            "resultsLimit": int(limit),
+            "resultsType": "posts"
+        }
+        items = run_apify_actor_v2(
+            APIFY_ACTOR_IG_POSTS,
+            tokens,
+            payload,
+            timeout_secs=apify_timeout_for_limit(int(limit))
+        )
     return normalize_common_optimized(items, "instagram")
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1641,6 +2215,12 @@ if debug_mode:
 st.sidebar.markdown("---")
 
 platform = st.sidebar.selectbox("🌐 Plataforma", ["X (Twitter)", "Instagram", "Facebook", "TikTok"])
+provider_options = ["Auto"]
+if platform in ("Instagram", "Facebook"):
+    provider_options.extend(["Apify", "ScrapeCreators", "Bright Data"])
+provider_label = st.sidebar.selectbox("🧩 Proveedor", provider_options) if len(provider_options) > 1 else "Auto"
+provider = provider_label.strip().lower().replace(" ", "")
+provider = "scrapecreators" if provider == "scrapecreators" else "brightdata" if provider == "brightdata" else "apify" if provider == "apify" else "auto"
 
 if platform == "Instagram":
     search_mode = st.sidebar.radio("🔎 Modo", ["Por tematica (hashtags)", "Por tematica (busqueda IG)", "Por usuario"])
@@ -1733,6 +2313,22 @@ else:
     api_apify = None
     st.sidebar.error("❌ Apify Token no configurado (define APIFY_TOKEN en Streamlit Secrets)")
 
+env_scrapecreators = env("SCRAPECREATORS_API_KEY")
+if env_scrapecreators:
+    api_scrapecreators = env_scrapecreators
+    st.sidebar.success("✅ ScrapeCreators API Key cargada desde secrets/config")
+else:
+    api_scrapecreators = None
+    st.sidebar.info("ℹ️ ScrapeCreators no configurado (opcional para Instagram/Facebook)")
+
+env_brightdata = env("BRIGHTDATA_API_TOKEN")
+if env_brightdata:
+    api_brightdata = env_brightdata
+    st.sidebar.success("✅ Bright Data Token cargado desde secrets/config")
+else:
+    api_brightdata = None
+    st.sidebar.info("ℹ️ Bright Data no configurado (opcional para Instagram/Facebook)")
+
 st.sidebar.divider()
 
 if st.session_state.get("search_active"):
@@ -1787,18 +2383,56 @@ if run_btn:
             df = fetch_x_cached(api_x, q, limit)
 
         elif platform == "Facebook":
-            if not tokens:
+            if search_mode == "Por tematica" and not tokens:
                 st.error("Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
                 log_message("Token Apify no configurada", "error")
                 st.stop()
+            if search_mode == "Por usuario" and provider == "apify" and not tokens:
+                st.error("Proveedor Facebook=Apify requiere APIFY_TOKEN.")
+                log_message("APIFY_TOKEN faltante para Facebook/Apify", "error")
+                st.stop()
+            if search_mode == "Por usuario" and provider == "scrapecreators" and not api_scrapecreators:
+                st.error("Proveedor Facebook=ScrapeCreators requiere SCRAPECREATORS_API_KEY.")
+                log_message("SCRAPECREATORS_API_KEY faltante para Facebook", "error")
+                st.stop()
+            if search_mode == "Por usuario" and provider == "brightdata" and not api_brightdata:
+                st.error("Proveedor Facebook=Bright Data requiere BRIGHTDATA_API_TOKEN.")
+                log_message("BRIGHTDATA_API_TOKEN faltante para Facebook", "error")
+                st.stop()
+            if search_mode == "Por usuario" and provider == "auto" and not any([tokens, api_scrapecreators, api_brightdata]):
+                st.error("Facebook requiere al menos una credencial: APIFY_TOKEN, SCRAPECREATORS_API_KEY o BRIGHTDATA_API_TOKEN.")
+                log_message("No hay credenciales disponibles para Facebook", "error")
+                st.stop()
             mode = "user" if "usuario" in search_mode else "search"
             q = username_input if mode == "user" else topic
-            df = fetch_facebook_cached(tokens, q, limit, mode, location=fb_location, fb_search_type=fb_search_type)
+            df = fetch_facebook_cached(
+                tokens,
+                api_scrapecreators,
+                api_brightdata,
+                q,
+                limit,
+                mode,
+                location=fb_location,
+                fb_search_type=fb_search_type,
+                provider=provider
+            )
 
         elif platform == "Instagram":
-            if not tokens:
-                st.error("Falta Token Apify. Configura APIFY_TOKEN en Streamlit Secrets.")
-                log_message("Token Apify no configurada", "error")
+            if provider == "apify" and not tokens:
+                st.error("Proveedor Instagram=Apify requiere APIFY_TOKEN.")
+                log_message("APIFY_TOKEN faltante para Instagram/Apify", "error")
+                st.stop()
+            if provider == "scrapecreators" and not api_scrapecreators:
+                st.error("Proveedor Instagram=ScrapeCreators requiere SCRAPECREATORS_API_KEY.")
+                log_message("SCRAPECREATORS_API_KEY faltante para Instagram", "error")
+                st.stop()
+            if provider == "brightdata" and not api_brightdata:
+                st.error("Proveedor Instagram=Bright Data requiere BRIGHTDATA_API_TOKEN.")
+                log_message("BRIGHTDATA_API_TOKEN faltante para Instagram", "error")
+                st.stop()
+            if provider == "auto" and not any([tokens, api_scrapecreators, api_brightdata]):
+                st.error("Instagram requiere al menos una credencial: APIFY_TOKEN, SCRAPECREATORS_API_KEY o BRIGHTDATA_API_TOKEN.")
+                log_message("No hay credenciales disponibles para Instagram", "error")
                 st.stop()
             search_mode_norm = unidecode((search_mode or "").lower())
             mode = "hashtag" if "hashtag" in search_mode_norm else "keyword" if "busqueda" in search_mode_norm else "user"
@@ -1816,7 +2450,7 @@ if run_btn:
                 raise RuntimeError("La consulta de Instagram esta vacia. Ingresa al menos un hashtag, keyword o usuario segun el modo.")
 
             log_message(f"Instagram modo={mode} query_resuelta='{q}'", "info")
-            df = fetch_instagram_cached(tokens, q, limit, mode)
+            df = fetch_instagram_cached(tokens, api_scrapecreators, api_brightdata, q, limit, mode, provider=provider)
 
         elif platform == "TikTok":
             if not tokens:

@@ -1,6 +1,7 @@
 # SocialListeningPro - X + Instagram + Facebook + TikTok
 - X (Twitter) via twitterapi.io (free-tier pacing)
-- IG/FB/TikTok via Apify Store actors (usa APIFY_TOKEN)
+- Instagram/Facebook con selector de proveedor: `Apify`, `ScrapeCreators` o `Bright Data`
+- TikTok via Apify Store actors (usa `APIFY_TOKEN`)
 - Visualizaciones, sentimiento en espanol, export CSV/Excel con fix de timezone
 - Modo dev con live-reload (docker-compose.dev.yml)
 - Apify con retry/backoff y metricas de runs (Debug Tools)
@@ -10,7 +11,7 @@
 ## Pasos local
 ```powershell
 Copy-Item .env.example .env
-notepad .env   # completa TWITTERAPI_IO_KEY, APIFY_TOKEN, ADMIN_USER, ADMIN_PASS
+notepad .env   # completa TWITTERAPI_IO_KEY y los providers que vayas a usar
 docker compose up --build -d
 # modo dev:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
@@ -21,6 +22,8 @@ Abre: http://localhost:8501
 Configura estos secrets en la app:
 - `TWITTERAPI_IO_KEY`
 - `APIFY_TOKEN`
+- `SCRAPECREATORS_API_KEY`
+- `BRIGHTDATA_API_TOKEN`
 - `DEEPSEEK_API_KEY`
 - `ADMIN_USER`
 - `ADMIN_PASS`
@@ -34,3 +37,5 @@ Nota:
   - `IA modo rapido` (muestra priorizada por engagement)
   - modo precision (analiza todos los posts)
 - En Facebook `Por tematica`, si el slider supera 100, la app ajusta automaticamente a 100 (restriccion del actor).
+- En Instagram/Facebook `Por usuario`, `Auto` intenta usar proveedor alternativo si esta configurado y hace fallback a Apify.
+- En Instagram `Por tematica (busqueda IG)`, Bright Data no tiene mapeo estable en esta app y hace fallback a otro proveedor si existe.
