@@ -53,7 +53,8 @@ APIFY_ACTOR_FB_SEARCH_ALT = "danek/facebook-search-ppr"              # fallback 
 APIFY_ACTOR_FB_PAGES   = "apify/facebook-posts-scraper"              # por usuario/url (pages/groups)
 
 # Polling / sync improvements
-ASYNC_POLL_INTERVAL = 3
+ASYNC_POLL_INTERVAL = 1.5
+APIFY_WAIT_FOR_FINISH_SECS = 10
 APIFY_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 APIFY_RETRY_MAX_ATTEMPTS = 4
 APIFY_RETRY_BASE_DELAY = 1.5
